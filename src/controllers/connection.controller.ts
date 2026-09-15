@@ -1,0 +1,167 @@
+import { Elysia, t } from "elysia";
+
+import { authInterceptor } from "../interceptors/auth.interceptor";
+import type { AddConnectionDTO } from "../dto/add-connection.dto";
+import {
+  addConnection,
+  blockedUsersListing,
+  getConnections,
+  getUserPhotos,
+  unfollow,
+  userFriendsAndFollowingCount,
+} from "../services/connection.service";
+
+/**
+ * Protected connection endpoints (Bearer token → APISIX injects X-Userinfo).
+ * `authInterceptor` makes `userId` available to every handler and rejects
+ * with 401 when the identity header is missing/invalid.
+ *
+ * NOTE: APISIX strips the `/connection` prefix, so routes here are registered
+ * WITHOUT that prefix (e.g. `/blockedusers` → gateway `/connection/blockedusers`).
+ *
+ * HOW TO ADD A PROTECTED ENDPOINT HERE:
+ *   .get("/friends", async ({ userId }) => ...,
+ *        { detail: { tags: ["Connections"], summary: "...", security: [{ bearerAuth: [] }] } })
+ */
+export const connectionController = authInterceptor(new Elysia())
+  .get(
+    "/blockedusers",
+    async ({ userId }) => {
+      // No logic here — just call the service and return its response.
+      return await blockedUsersListing(userId);
+    },
+    {
+      detail: {
+        tags: ["Connections"],
+        summary: "Get the current user's blocked users",
+        description:
+          "Returns the current user's blocked users (paginated, sorted by followers, " +
+          "enriched with connection counts + relationship flags).",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .get(
+    "/photos/:id",
+    async ({ params, userId }) => {
+      // No logic here — just call the service and return its response.
+      return await getUserPhotos(params.id, userId);
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      detail: {
+        tags: ["Connections"],
+        summary: "Get a user's photos (privacy-gated)",
+        description:
+          "Returns the photo list of a user gated by privacy settings " +
+          "(owner / blocked / relation / circles checks).",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .get(
+    "/connectionscount",
+    async ({ userId }) => {
+      // No logic here — just call the service and return its response.
+      return await userFriendsAndFollowingCount(userId);
+    },
+    {
+      detail: {
+        tags: ["Connections"],
+        summary: "Get the current user's friends & following counts",
+        description:
+          "Returns friendsCount and followingCount, excluding connections to " +
+          "blocked (either direction) or deleted users.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/unfollow",
+    async ({ body, set, userId }) => {
+      const connectionId = (body as any)?.connectionId;
+      if (typeof connectionId !== "string" || connectionId.trim().length === 0) {
+        set.status = 400;
+        return {
+          statusCode: 400,
+          message: ["connectionId should not be empty"],
+          error: "Bad Request",
+        };
+      }
+      // No logic here — just call the service and return its response.
+      return await unfollow(userId, connectionId);
+    },
+    {
+      body: t.Object(
+        { connectionId: t.Optional(t.String()) },
+        { additionalProperties: true }
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Unfollow a user",
+        description:
+          "Removes the following connection and recomputes cached counts; also " +
+          "notifies User-service /connections/remove.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/addConnection",
+    async ({ body, userId }) => {
+      const payload = body as AddConnectionDTO;
+      payload.userId = userId; // userId hamesha auth se (body ka ignore)
+      // No logic here — just call the service and return its response.
+      return await addConnection(payload);
+    },
+    {
+      body: t.Object(
+        {
+          connectionId: t.Optional(t.String()),
+          requestType: t.Optional(t.String()),
+          relationType: t.Optional(t.String()),
+          preApprovedPlan: t.Optional(t.Boolean()),
+          hideNotification: t.Optional(t.Boolean()),
+        },
+        { additionalProperties: true }
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Add a connection (friend / follow request / following)",
+        description:
+          "Creates a friendrequest / followrequest / following connection with " +
+          "duplicate guards, profile checks, and count updates.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .get(
+    "/connections",
+    async ({ query, userId }) => {
+      const q = query as Record<string, string | undefined>;
+      const connectionType = q.connectionType ?? "all";
+      const targetUserId = q.userId || userId; // default to authenticated user
+      // No logic here — just call the service and return its response.
+      return await getConnections({
+        connectionType,
+        userId: targetUserId,
+        authenticatedUserId: userId,
+      });
+    },
+    {
+      query: t.Object(
+        {
+          connectionType: t.Optional(t.String()),
+          userId: t.Optional(t.String()),
+        },
+        { additionalProperties: true }
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Get connections (requests / invited / following / followers / friends / all)",
+        description:
+          "Read-only list of connections built via aggregation, dedup, and friend filter.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  );

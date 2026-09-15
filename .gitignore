@@ -1,0 +1,31 @@
+# dependencies (bun install)
+node_modules
+
+# build output
+dist
+out
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+*.log
+
+# dotenv environment files (secrets - never commit; keep .env.example)
+.env
+.env.*
+!.env.example
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# editor / IDE
+.idea
+
+# OS
+.DS_Store
