@@ -158,8 +158,7 @@ export const circlesController = authInterceptor(new Elysia())
         tags: ["Circles"],
         summary: "Create a circle",
         description:
-          "Creates a circle (uuid v4 id) with optional seeded members and fires the " +
-          "User-service create side effect.",
+          "Creates a circle (uuid v4 id) with optional seeded members.",
         security: [{ bearerAuth: [] }],
       },
     }
@@ -201,9 +200,7 @@ export const circlesController = authInterceptor(new Elysia())
       detail: {
         tags: ["Circles"],
         summary: "Delete a circle (soft delete)",
-        description:
-          "Owner-only soft delete (`isDeleted: true`) and awaits the User-service " +
-          "delete side effect.",
+        description: "Owner-only soft delete (`isDeleted: true`).",
         security: [{ bearerAuth: [] }],
       },
     }
@@ -229,9 +226,7 @@ export const circlesController = authInterceptor(new Elysia())
       detail: {
         tags: ["Circles"],
         summary: "Add members to a circle",
-        description:
-          "Owner-only append of new members (dedup by _id) + per-member User-service " +
-          "side effect.",
+        description: "Owner-only append of new members (dedup by _id).",
         security: [{ bearerAuth: [] }],
       },
     }
@@ -255,9 +250,7 @@ export const circlesController = authInterceptor(new Elysia())
       detail: {
         tags: ["Circles"],
         summary: "Remove members from a circle",
-        description:
-          "Owner-only removal of the given member ids + per-member User-service " +
-          "side effect.",
+        description: "Owner-only removal of the given member ids.",
         security: [{ bearerAuth: [] }],
       },
     }

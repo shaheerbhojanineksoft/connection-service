@@ -6,10 +6,6 @@ export const constants = {
   DATABASE_URL: process.env.DATABASE_URL ?? "mongodb://localhost:27017",
   DATABASE_NAME: process.env.DATABASE_NAME ?? "Traderverse-connections",
 
-  // --- User-service (POST /connections/remove) ---
-  USER_SERVICE_HOST: process.env.USER_SERVICE_HOST ?? "",
-  USER_SERVICE_PORT: process.env.USER_SERVICE_PORT ?? "",
-
   // --- NATS: social graph events (per feed-data-sync-service contract) ---
   // Same local cluster as user-and-identity-service; anonymous connect is
   // rejected (auth callout), so the dev user auth/auth is used as default.

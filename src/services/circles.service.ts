@@ -8,7 +8,6 @@
  * ⚠️ Payloads, response envelopes, messages and HTTP behaviour are preserved
  * EXACTLY as documented (including the duplicate-name caveat §6.1).
  */
-import { constants } from "../config/constants";
 import type {
   AddCircleDTO,
   AddRemoveCircleMemberDTO,
@@ -30,9 +29,6 @@ import {
   publishSocialCircleMemberRemoved,
 } from "./nats.publisher";
 
-/** User Service base URL — side effects are best-effort (never change the response). */
-const USER_SERVICE_URL = `http://${constants.USER_SERVICE_HOST}:${constants.USER_SERVICE_PORT}`;
-
 /* ------------------------------------------------------------------ */
 /* Envelope helpers (field order: isSuccess, data, message)            */
 /* ------------------------------------------------------------------ */
@@ -51,43 +47,10 @@ function genericError(): ResponseModel<any> {
 }
 
 /** Never persist/return credentials stored on raw user documents. */
-function sanitizeUser(user: Record<string, any>): Record<string, any> {
+function sanitizeUser(user: Record<string, any>): any {
   const copy = { ...user };
   delete copy.password;
   return copy;
-}
-
-/* ------------------------------------------------------------------ */
-/* User Service side effects (fire-and-forget except deleteCircle)     */
-/* ------------------------------------------------------------------ */
-
-async function userServicePost(path: string, body: Record<string, unknown>): Promise<void> {
-  try {
-    const res = await fetch(`${USER_SERVICE_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    console.log(`[circles] POST ${path} → ${res.status}`);
-  } catch (err) {
-    console.error(`[circles] POST ${path} failed:`, err instanceof Error ? err.message : err);
-  }
-}
-
-async function userServiceDelete(
-  path: string,
-  body?: Record<string, unknown>
-): Promise<void> {
-  try {
-    const res = await fetch(`${USER_SERVICE_URL}${path}`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    console.log(`[circles] DELETE ${path} → ${res.status}`);
-  } catch (err) {
-    console.error(`[circles] DELETE ${path} failed:`, err instanceof Error ? err.message : err);
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -272,13 +235,6 @@ export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
     const inserted = await insertCircle(circle);
     if (!inserted?._id) return fail("Failed to create circle");
 
-    // Fire-and-forget side effect — only when the created circle has an _id.
-    void userServicePost("/circles", {
-      circleId: inserted._id,
-      members: memberIds ?? [],
-      userId: createdBy,
-    });
-
     // Publish social.circle.created AFTER the Mongo insert commits
     // (best-effort — never throws, never blocks).
     void publishSocialCircleCreated(String(inserted._id), String(name));
@@ -335,9 +291,6 @@ export async function deleteCircleById(
     // Soft delete.
     await updateCircle({ _id: circleId }, { $set: { isDeleted: true } });
 
-    // Side effect (awaited; result only logged, never changes the response).
-    await userServiceDelete(`/circles/${circleId}`);
-
     // Publish social.circle.deleted AFTER the Mongo soft delete commits
     // (best-effort — never throws, never blocks).
     void publishSocialCircleDeleted(String(circleId));
@@ -382,11 +335,6 @@ export async function addCircleMember(
       void publishSocialCircleMemberAdded(String(circleId), String(member._id));
     }
 
-    // Fire-and-forget side effect — one call per requested member id.
-    for (const id of memberIds ?? []) {
-      void userServicePost(`/circles/${circleId}/members`, { userId: id, ownerId: userId });
-    }
-
     return ok(updated ?? { ...circle, members }, "Members Added To Circle");
   } catch {
     return genericError();
@@ -423,14 +371,6 @@ export async function removeCircleMember(
     // update commits (best-effort — never throws, never blocks).
     for (const member of removed) {
       void publishSocialCircleMemberRemoved(String(circleId), String(member._id));
-    }
-
-    // Fire-and-forget side effect — one call per requested member id.
-    for (const id of memberIds ?? []) {
-      void userServiceDelete(`/circles/${circleId}/members`, {
-        userId: id,
-        ownerId: userId,
-      });
     }
 
     return ok(updated ?? { ...circle, members }, "Members Removed From Circle");

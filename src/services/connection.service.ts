@@ -3,7 +3,6 @@ import {
   countUserViews,
   findUserViews,
 } from "../repositories/userView.repo";
-import { constants } from "../config/constants";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
 import type { GetConnectionsDTO } from "../dto/get-connections.dto";
 import {
@@ -516,12 +515,10 @@ export async function userFriendsAndFollowingCount(currentUserId: string) {
 /* POST /unfollow — remove a following connection (per source spec)     */
 /* ------------------------------------------------------------------ */
 
-const USER_SERVICE_URL = `http://${constants.USER_SERVICE_HOST}:${constants.USER_SERVICE_PORT}`;
-
 /**
  * Business logic for POST /unfollow (per source spec).
- * Deletes the `following` connection, recomputes + persists cached counts
- * for both ids, then POSTs to User-service /connections/remove.
+ * Deletes the `following` connection and recomputes + persists cached counts
+ * for both ids.
  * ⚠️ catch message typo preserved: "Somthing Went Wrong."
  */
 export async function unfollow(currentUserId: string, connectionId: string) {
@@ -550,18 +547,7 @@ export async function unfollow(currentUserId: string, connectionId: string) {
     // 4. Socialmedia response
     const response = { isSuccess: true, message: "Successfully Unfollowed." };
 
-    // 5. axios POST to User-service (result discarded; a throw -> typo error)
-    await fetch(`${USER_SERVICE_URL}/connections/remove`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        connectionId,
-        userId: currentUserId,
-        requestType: "following",
-      }),
-    });
-
-    // 6. return the Socialmedia response
+    // 5. return the Socialmedia response
     return response;
   } catch (error: any) {
     console.error("Error Message :", error.message);

@@ -118,8 +118,8 @@ export const connectionController = authInterceptor(new Elysia())
         tags: ["Connections"],
         summary: "Unfollow a user",
         description:
-          "Removes the following connection and recomputes cached counts; also " +
-          "notifies User-service /connections/remove.",
+          "Removes the following connection and recomputes cached counts for both " +
+          "users.",
         security: [{ bearerAuth: [] }],
       },
     }
