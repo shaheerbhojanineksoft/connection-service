@@ -19,4 +19,6 @@ export const constants = {
   SOCIAL_STREAM: "SOCIAL",
   SOCIAL_FOLLOWED_SUBJECT: process.env.SOCIAL_FOLLOWED_SUBJECT ?? "social.followed",
   SOCIAL_UNFOLLOWED_SUBJECT: process.env.SOCIAL_UNFOLLOWED_SUBJECT ?? "social.unfollowed",
+  SOCIAL_BLOCKED_SUBJECT: process.env.SOCIAL_BLOCKED_SUBJECT ?? "social.blocked",
+  SOCIAL_UNBLOCKED_SUBJECT: process.env.SOCIAL_UNBLOCKED_SUBJECT ?? "social.unblocked",
 } as const;

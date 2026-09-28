@@ -146,6 +146,62 @@ export async function publishSocialUnfollowed(
 }
 
 /**
+ * Publish a "blocked" event. Best-effort, never throws.
+ * Call AFTER the Mongo block upsert + connection cleanup commits.
+ * Payload matches feed-data-sync-service `BlockEventSchema`: { blockerId, blockedId, mts }.
+ */
+export async function publishSocialBlocked(
+  blockerId: string,
+  blockedId: string
+): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_BLOCKED_SUBJECT,
+      encode({ blockerId, blockedId, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_BLOCKED_SUBJECT} ` +
+        `{ blockerId=${blockerId}, blockedId=${blockedId} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_BLOCKED_SUBJECT} blockerId=${blockerId} blockedId=${blockedId}`,
+      err
+    );
+  }
+}
+
+/**
+ * Publish an "unblocked" event. Best-effort, never throws.
+ * Call AFTER the Mongo block delete commits.
+ * Payload matches feed-data-sync-service `BlockEventSchema`: { blockerId, blockedId, mts }.
+ */
+export async function publishSocialUnblocked(
+  blockerId: string,
+  blockedId: string
+): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_UNBLOCKED_SUBJECT,
+      encode({ blockerId, blockedId, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_UNBLOCKED_SUBJECT} ` +
+        `{ blockerId=${blockerId}, blockedId=${blockedId} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_UNBLOCKED_SUBJECT} blockerId=${blockerId} blockedId=${blockedId}`,
+      err
+    );
+  }
+}
+
+/**
  * Warm up the NATS connection when the service boots (best-effort).
  * Logs success / failure on the console but NEVER blocks or fails startup.
  */

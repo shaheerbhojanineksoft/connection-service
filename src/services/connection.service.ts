@@ -24,7 +24,12 @@ import {
 import { findCircles } from "../repositories/circles.repo";
 import { findPhotos } from "../repositories/photos.repo";
 import { findManyUsers, findOneUser, updateUser } from "../repositories/users.repo";
-import { publishSocialFollowed, publishSocialUnfollowed } from "./nats.publisher";
+import {
+  publishSocialBlocked,
+  publishSocialFollowed,
+  publishSocialUnblocked,
+  publishSocialUnfollowed,
+} from "./nats.publisher";
 import type { BlockedUserDocument, ResponseModel } from "../types/block-user.types";
 
 /** Diversification count aggregation (spec §3 / §4 helper). */
@@ -174,6 +179,10 @@ export async function blockUser(
       ],
     });
 
+    // Publish social.blocked AFTER the Mongo block + cleanup commits
+    // (best-effort — never throws, never blocks).
+    void publishSocialBlocked(String(currentUserId), String(blockedId));
+
     // 4. recompute friend / follower / following counts for BOTH users.
     await updateFriendAndFollowerCount(currentUserId, blockedId);
 
@@ -197,6 +206,10 @@ export async function unblockUser(currentUserId: string, blockedId: string) {
   try {
     // 1. remove the block edge (only the direction owned by the current user).
     await deleteBlocked({ userId: currentUserId, blockedId });
+
+    // Publish social.unblocked AFTER the Mongo delete commits (best-effort —
+    // never throws, never blocks).
+    void publishSocialUnblocked(String(currentUserId), String(blockedId));
 
     // 2. recompute friend / follower / following counts for BOTH users.
     await updateFriendAndFollowerCount(currentUserId, blockedId);
