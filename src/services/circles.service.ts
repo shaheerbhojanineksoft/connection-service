@@ -23,6 +23,12 @@ import {
 import { findConnectionsPaged } from "../repositories/connections.repo";
 import { findManyUsers } from "../repositories/users.repo";
 import type { Circle, ResponseModel } from "../types/circle.types";
+import {
+  publishSocialCircleCreated,
+  publishSocialCircleDeleted,
+  publishSocialCircleMemberAdded,
+  publishSocialCircleMemberRemoved,
+} from "./nats.publisher";
 
 /** User Service base URL — side effects are best-effort (never change the response). */
 const USER_SERVICE_URL = `http://${constants.USER_SERVICE_HOST}:${constants.USER_SERVICE_PORT}`;
@@ -273,6 +279,10 @@ export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
       userId: createdBy,
     });
 
+    // Publish social.circle.created AFTER the Mongo insert commits
+    // (best-effort — never throws, never blocks).
+    void publishSocialCircleCreated(String(inserted._id), String(name));
+
     return ok(inserted, "Circle created successfully");
   } catch {
     return genericError();
@@ -328,6 +338,10 @@ export async function deleteCircleById(
     // Side effect (awaited; result only logged, never changes the response).
     await userServiceDelete(`/circles/${circleId}`);
 
+    // Publish social.circle.deleted AFTER the Mongo soft delete commits
+    // (best-effort — never throws, never blocks).
+    void publishSocialCircleDeleted(String(circleId));
+
     return ok(null, "Circle deleted successfully");
   } catch {
     return fail("Failed to delete circle");
@@ -362,6 +376,12 @@ export async function addCircleMember(
     await updateCircle({ _id: circleId }, { $set: { members } });
     const updated = await findOneCircle({ _id: circleId });
 
+    // Publish social.circle.member.added per NEWLY added member AFTER the Mongo
+    // update commits (best-effort — never throws, never blocks).
+    for (const member of toAdd) {
+      void publishSocialCircleMemberAdded(String(circleId), String(member._id));
+    }
+
     // Fire-and-forget side effect — one call per requested member id.
     for (const id of memberIds ?? []) {
       void userServicePost(`/circles/${circleId}/members`, { userId: id, ownerId: userId });
@@ -389,12 +409,21 @@ export async function removeCircleMember(
     if (circle.userId !== userId) return fail("You are not authorized");
 
     const removeIds = new Set((memberIds ?? []).map((id) => String(id)));
+    const removed = (circle.members ?? []).filter((m: any) =>
+      removeIds.has(String(m._id))
+    );
     const members = (circle.members ?? []).filter(
       (m: any) => !removeIds.has(String(m._id))
     );
 
     await updateCircle({ _id: circleId }, { $set: { members } });
     const updated = await findOneCircle({ _id: circleId });
+
+    // Publish social.circle.member.removed per removed member AFTER the Mongo
+    // update commits (best-effort — never throws, never blocks).
+    for (const member of removed) {
+      void publishSocialCircleMemberRemoved(String(circleId), String(member._id));
+    }
 
     // Fire-and-forget side effect — one call per requested member id.
     for (const id of memberIds ?? []) {

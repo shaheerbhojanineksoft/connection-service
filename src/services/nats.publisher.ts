@@ -202,6 +202,115 @@ export async function publishSocialUnblocked(
 }
 
 /**
+ * Publish a "circle.created" event. Best-effort, never throws.
+ * Call AFTER the Mongo circle insert commits.
+ * Payload matches feed-data-sync-service `CircleCreatedEventSchema`: { circleId, name, mts }.
+ */
+export async function publishSocialCircleCreated(
+  circleId: string,
+  name: string
+): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_CIRCLE_CREATED_SUBJECT,
+      encode({ circleId, name, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_CIRCLE_CREATED_SUBJECT} ` +
+        `{ circleId=${circleId}, name=${name} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_CIRCLE_CREATED_SUBJECT} circleId=${circleId}`,
+      err
+    );
+  }
+}
+
+/**
+ * Publish a "circle.deleted" event. Best-effort, never throws.
+ * Call AFTER the Mongo soft delete commits.
+ * Payload matches feed-data-sync-service `CircleDeletedEventSchema`: { circleId, mts }.
+ */
+export async function publishSocialCircleDeleted(circleId: string): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_CIRCLE_DELETED_SUBJECT,
+      encode({ circleId, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_CIRCLE_DELETED_SUBJECT} ` +
+        `{ circleId=${circleId} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_CIRCLE_DELETED_SUBJECT} circleId=${circleId}`,
+      err
+    );
+  }
+}
+
+/**
+ * Publish a "circle.member.added" event. Best-effort, never throws.
+ * Call AFTER the Mongo members update commits — one event per newly added member.
+ * Payload matches feed-data-sync-service `CircleMemberEventSchema`: { circleId, userId, mts }.
+ */
+export async function publishSocialCircleMemberAdded(
+  circleId: string,
+  userId: string
+): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_CIRCLE_MEMBER_ADDED_SUBJECT,
+      encode({ circleId, userId, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_CIRCLE_MEMBER_ADDED_SUBJECT} ` +
+        `{ circleId=${circleId}, userId=${userId} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_CIRCLE_MEMBER_ADDED_SUBJECT} circleId=${circleId} userId=${userId}`,
+      err
+    );
+  }
+}
+
+/**
+ * Publish a "circle.member.removed" event. Best-effort, never throws.
+ * Call AFTER the Mongo members update commits — one event per removed member.
+ * Payload matches feed-data-sync-service `CircleMemberEventSchema`: { circleId, userId, mts }.
+ */
+export async function publishSocialCircleMemberRemoved(
+  circleId: string,
+  userId: string
+): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_CIRCLE_MEMBER_REMOVED_SUBJECT,
+      encode({ circleId, userId, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_CIRCLE_MEMBER_REMOVED_SUBJECT} ` +
+        `{ circleId=${circleId}, userId=${userId} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_CIRCLE_MEMBER_REMOVED_SUBJECT} circleId=${circleId} userId=${userId}`,
+      err
+    );
+  }
+}
+
+/**
  * Warm up the NATS connection when the service boots (best-effort).
  * Logs success / failure on the console but NEVER blocks or fails startup.
  */
