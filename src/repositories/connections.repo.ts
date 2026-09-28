@@ -19,6 +19,25 @@ export async function findConnections(
   return (await connections()).find(filter, { projection }).toArray();
 }
 
+export interface ConnectionQueryOpts {
+  sort?: Record<string, 1 | -1>;
+  skip?: number;
+  limit?: number;
+  projection?: Record<string, 1 | 0>;
+}
+
+/** Paginated/sorted find (used by the Circles `/connections` listing). */
+export async function findConnectionsPaged(
+  filter: Record<string, any>,
+  opts: ConnectionQueryOpts = {}
+): Promise<Document[]> {
+  let cursor = (await connections()).find(filter, { projection: opts.projection });
+  if (opts.sort) cursor = cursor.sort(opts.sort);
+  if (opts.skip) cursor = cursor.skip(opts.skip);
+  if (opts.limit) cursor = cursor.limit(opts.limit);
+  return cursor.toArray();
+}
+
 export async function countConnections(filter: Record<string, any>): Promise<number> {
   return (await connections()).countDocuments(filter);
 }

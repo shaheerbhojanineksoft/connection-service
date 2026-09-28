@@ -3,6 +3,7 @@ import { swagger } from "@elysiajs/swagger";
 
 import { healthController } from "./controllers/health.controller";
 import { connectionController } from "./controllers/connection.controller";
+import { circlesController } from "./controllers/circles.controller";
 
 /**
  * Main application assembly (like app.js / main.ts in Node.js).
@@ -36,6 +37,10 @@ export const app = new Elysia()
             name: "Connections",
             description: "Authenticated connection endpoints (Bearer token required)",
           },
+          {
+            name: "Circles",
+            description: "Authenticated circles endpoints (Bearer token required)",
+          },
         ],
         // Make Swagger UI's "Try it out" go through the APISIX gateway
         // (the service only trusts APISIX-injected X-Userinfo, not raw JWTs).
@@ -65,6 +70,7 @@ export const app = new Elysia()
     openapi: "/swagger/json",
   }))
   .use(healthController)      // public
-  .use(connectionController); // protected (openid-connect + interceptor)
+  .use(connectionController)  // protected (openid-connect + interceptor)
+  .use(circlesController);    // protected (openid-connect + interceptor)
 
 export type App = typeof app;
