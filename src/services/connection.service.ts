@@ -6,7 +6,13 @@ import {
 import { constants } from "../config/constants";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
 import type { GetConnectionsDTO } from "../dto/get-connections.dto";
-import { findBlocked, findOneBlocked } from "../repositories/blocked.repo";
+import {
+  deleteBlocked,
+  findBlocked,
+  findOneBlocked,
+  insertBlocked,
+  updateBlocked,
+} from "../repositories/blocked.repo";
 import {
   aggregateConnections,
   countConnections,
@@ -19,6 +25,7 @@ import { findCircles } from "../repositories/circles.repo";
 import { findPhotos } from "../repositories/photos.repo";
 import { findManyUsers, findOneUser, updateUser } from "../repositories/users.repo";
 import { publishSocialFollowed, publishSocialUnfollowed } from "./nats.publisher";
+import type { BlockedUserDocument, ResponseModel } from "../types/block-user.types";
 
 /** Diversification count aggregation (spec §3 / §4 helper). */
 async function calculateTotalDiversificationCount(query: Record<string, any>) {
@@ -110,6 +117,95 @@ async function countUsersBatch(userIds: string[]): Promise<Record<string, any>> 
       ];
     })
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /block — block a user (per source spec — Socialmedia blockUser) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Business logic for POST /block (per source spec — ALL-IN-ONE, direct Mongo).
+ * Payload/response match the integration contract exactly:
+ *   request  → { blockedId } (blocker id comes from the token)
+ *   response → { isSuccess, data: <blocked document>, message }
+ * Service-level failures still resolve (HTTP 201 with isSuccess:false).
+ */
+export async function blockUser(
+  currentUserId: string,
+  blockedId: string
+): Promise<ResponseModel<BlockedUserDocument>> {
+  try {
+    // 1. target user — source of the denormalized `blocked*` fields.
+    //    Missing target → service-level failure branch.
+    const blockedUser = await findOneUser({ _id: blockedId });
+    if (!blockedUser) {
+      return { isSuccess: false, message: "Something Went Wrong." };
+    }
+
+    const now = Date.now();
+    const fields = {
+      userId: currentUserId,
+      blockedId,
+      blockedGender: blockedUser.gender ?? "",
+      blockedUserName: blockedUser.userName ?? "",
+      blockedFullName: blockedUser.fullName ?? "",
+      blockedProfilePicture: blockedUser.profilePicture ?? "",
+      isBlocked: true,
+      modifiedBy: "",
+      modifiedOn: now,
+    };
+
+    // 2. upsert the blocked document (idempotent — no duplicate edges).
+    let data: BlockedUserDocument;
+    const existing = await findOneBlocked({ userId: currentUserId, blockedId });
+    if (existing) {
+      await updateBlocked({ _id: existing._id }, { $set: fields });
+      data = { _id: String(existing._id), ...fields };
+    } else {
+      data = { _id: now.toString(), ...fields };
+      await insertBlocked(data);
+    }
+
+    // 3. connection cleanup — remove the edge in BOTH directions.
+    await deleteConnections({
+      $or: [
+        { userId: currentUserId, connectionId: blockedId },
+        { userId: blockedId, connectionId: currentUserId },
+      ],
+    });
+
+    // 4. recompute friend / follower / following counts for BOTH users.
+    await updateFriendAndFollowerCount(currentUserId, blockedId);
+
+    // 5. response — raw stored document, empty message.
+    return { isSuccess: true, data, message: "" };
+  } catch {
+    return { isSuccess: false, message: "Something Went Wrong." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /unblock — remove a block (per source spec)                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Business logic for POST /unblock (per source spec).
+ * Deletes the block edge owned by the current user and recomputes cached
+ * counts for both ids. Response: `{ isSuccess: true, message: "User unblocked." }`.
+ */
+export async function unblockUser(currentUserId: string, blockedId: string) {
+  try {
+    // 1. remove the block edge (only the direction owned by the current user).
+    await deleteBlocked({ userId: currentUserId, blockedId });
+
+    // 2. recompute friend / follower / following counts for BOTH users.
+    await updateFriendAndFollowerCount(currentUserId, blockedId);
+
+    // 3. response.
+    return { isSuccess: true, message: "User unblocked." };
+  } catch {
+    return { isSuccess: false, message: "Something Went Wrong." };
+  }
 }
 
 /**

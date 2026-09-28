@@ -4,12 +4,30 @@ import { authInterceptor } from "../interceptors/auth.interceptor";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
 import {
   addConnection,
+  blockUser,
   blockedUsersListing,
   getConnections,
   getUserPhotos,
+  unblockUser,
   unfollow,
   userFriendsAndFollowingCount,
 } from "../services/connection.service";
+
+/**
+ * NestJS/class-validator style 400 body (matches the integration contract).
+ * Message order: "must be a string" first, then "should not be empty".
+ */
+function validateBlockedId(body: unknown): string[] {
+  const raw = (body as { blockedId?: unknown } | undefined)?.blockedId;
+  const messages: string[] = [];
+  if (typeof raw !== "string") messages.push("blockedId must be a string");
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.length === 0)) {
+    messages.push("blockedId should not be empty");
+  }
+  return messages;
+}
+
+const BAD_REQUEST = { error: "Bad Request" as const };
 
 /**
  * Protected connection endpoints (Bearer token → APISIX injects X-Userinfo).
@@ -161,6 +179,73 @@ export const connectionController = authInterceptor(new Elysia())
         summary: "Get connections (requests / invited / following / followers / friends / all)",
         description:
           "Read-only list of connections built via aggregation, dedup, and friend filter.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/block",
+    async ({ body, set, userId }) => {
+      const messages = validateBlockedId(body);
+      if (messages.length) {
+        set.status = 400;
+        return { statusCode: 400, message: messages, ...BAD_REQUEST };
+      }
+      // userId always from the token — a body `userId` is ignored/replaced.
+      const result = await blockUser(userId, (body as { blockedId: string }).blockedId);
+      set.status = 201; // NestJS default for POST (service failures also return 201)
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object(
+          {
+            blockedId: t.Optional(t.Any()),
+            userId: t.Optional(t.Any()),
+          },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Block a user",
+        description:
+          "Blocks the user identified by `blockedId` (the blocker comes from the " +
+          "access token). Creates a `blocked` document, removes connections in " +
+          "both directions, and recomputes cached counts for both users.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/unblock",
+    async ({ body, set, userId }) => {
+      const messages = validateBlockedId(body);
+      if (messages.length) {
+        set.status = 400;
+        return { statusCode: 400, message: messages, ...BAD_REQUEST };
+      }
+      // userId always from the token — a body `userId` is ignored/replaced.
+      const result = await unblockUser(userId, (body as { blockedId: string }).blockedId);
+      set.status = 201;
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object(
+          {
+            blockedId: t.Optional(t.Any()),
+            userId: t.Optional(t.Any()),
+          },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Unblock a user",
+        description:
+          "Removes the block edge owned by the current user for `blockedId` and " +
+          "recomputes cached counts for both users.",
         security: [{ bearerAuth: [] }],
       },
     }

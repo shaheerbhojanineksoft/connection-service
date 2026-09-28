@@ -14,3 +14,19 @@ export async function findBlocked(filter: Record<string, any>): Promise<Document
 export async function findOneBlocked(filter: Record<string, any>): Promise<Document | null> {
   return (await blocked()).findOne(filter);
 }
+
+export async function insertBlocked(doc: Record<string, any>): Promise<Record<string, any>> {
+  await (await blocked()).insertOne(doc);
+  return doc;
+}
+
+export async function updateBlocked(
+  filter: Record<string, any>,
+  update: Document
+): Promise<void> {
+  await (await blocked()).updateOne(filter, update);
+}
+
+export async function deleteBlocked(filter: Record<string, any>): Promise<void> {
+  await (await blocked()).deleteMany(filter);
+}
