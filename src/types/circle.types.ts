@@ -13,6 +13,13 @@ export interface CircleMember {
 /** `circles` collection document. */
 export interface Circle {
   _id: string;
+  /**
+   * Legacy identity field — the production `circles` collection still has the
+   * OLD mongoose UNIQUE index `circleId_1`, so every insert must carry a unique
+   * value here (null is allowed only ONCE per collection → otherwise E11000).
+   * We write the same uuid as `_id`, keeping both ids interchangeable.
+   */
+  circleId: string;
   name: string;
   hexColor: string;
   members: CircleMember[];

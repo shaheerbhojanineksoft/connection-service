@@ -250,8 +250,15 @@ export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
         : [];
 
     const now = Date.now();
+    const circleId = crypto.randomUUID(); // uuid v4 (NOT a Mongo ObjectId)
     const circle: Circle = {
-      _id: crypto.randomUUID(), // uuid v4 (NOT a Mongo ObjectId)
+      _id: circleId,
+      // ⚠️ REQUIRED for the production DB: the old mongoose schema left a UNIQUE
+      // index `circleId_1` on this collection. Documents without the field store
+      // `circleId: null`, and only ONE document may hold a null → every further
+      // insert failed with `E11000 dup key: { circleId: null }`. Writing the same
+      // uuid keeps both ids interchangeable for legacy readers.
+      circleId,
       name,
       hexColor,
       members,
