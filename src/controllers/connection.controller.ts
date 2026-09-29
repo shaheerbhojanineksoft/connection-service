@@ -131,21 +131,29 @@ export const connectionController = authInterceptor(new Elysia())
   .post(
     "/addConnection",
     async ({ body, userId }) => {
-      const payload = body as AddConnectionDTO;
-      payload.userId = userId; // userId hamesha auth se (body ka ignore)
+      // No ValidationPipe in the source: a missing body behaves like `{}` and lands
+      // on the handler's default branch ("Invalid Request Type") — never a 422/500.
+      // ⚠️ The cast is deliberate: `AddConnectionDTO` types connectionId/requestType
+      // as required, but the source route validates nothing.
+      const payload = {
+        ...(body as AddConnectionDTO | undefined),
+        userId, // userId hamesha auth se (body ka ignore)
+      } as AddConnectionDTO;
       // No logic here — just call the service and return its response.
       return await addConnection(payload);
     },
     {
-      body: t.Object(
-        {
-          connectionId: t.Optional(t.String()),
-          requestType: t.Optional(t.String()),
-          relationType: t.Optional(t.String()),
-          preApprovedPlan: t.Optional(t.Boolean()),
-          hideNotification: t.Optional(t.Boolean()),
-        },
-        { additionalProperties: true }
+      body: t.Optional(
+        t.Object(
+          {
+            connectionId: t.Optional(t.String()),
+            requestType: t.Optional(t.String()),
+            relationType: t.Optional(t.String()),
+            preApprovedPlan: t.Optional(t.Boolean()),
+            hideNotification: t.Optional(t.Boolean()),
+          },
+          { additionalProperties: true }
+        )
       ),
       detail: {
         tags: ["Connections"],
