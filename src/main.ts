@@ -45,6 +45,14 @@ export const app = new Elysia()
         // Make Swagger UI's "Try it out" go through the APISIX gateway
         // (the service only trusts APISIX-injected X-Userinfo, not raw JWTs).
         servers: [
+           {
+            url: "https://lapi-dev.traderverse.io/connection",
+            description: "Dev gateway — Swagger UI at /authentication/swagger",
+          },
+          {
+            url: "https://lapi.traderverse.io/connection",
+            description: "Dev gateway — Swagger UI at /authentication/swagger",
+          },
           {
             url: "http://localhost:9080/connection",
             description: "APISIX Gateway (token verified here)",
