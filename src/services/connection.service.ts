@@ -21,6 +21,7 @@ import {
   findOneConnection,
   insertConnection,
   updateConnection,
+  upsertConnection,
 } from "../repositories/connections.repo";
 import { findCircles } from "../repositories/circles.repo";
 import { findPhotos } from "../repositories/photos.repo";
@@ -32,6 +33,29 @@ import {
   publishSocialUnfollowed,
 } from "./nats.publisher";
 import type { BlockedUserDocument, ResponseModel } from "../types/block-user.types";
+
+/**
+ * Failure log — the response envelope must stay unchanged, so the ONLY place the
+ * real error is visible is here. Never swallow an error silently.
+ *
+ * Mongo error codes worth naming: 11000 duplicate key (a UNIQUE index exists),
+ * 121 $jsonSchema validation, 13 not authorized, 50/89 network / timeout.
+ */
+function logFailure(
+  operation: string,
+  error: unknown,
+  context: Record<string, unknown> = {}
+): void {
+  const e = error as
+    | { name?: string; message?: string; code?: string | number; stack?: string }
+    | undefined;
+  console.error(
+    `[connections] ❌ ${operation} failed (name=${e?.name ?? "Error"}, code=${
+      e?.code ?? "-"
+    }) context=${JSON.stringify(context)}: ${e?.message ?? String(error)}`
+  );
+  if (e?.stack) console.error(`[connections] ${operation} stack:\n${e.stack}`);
+}
 
 /** Diversification count aggregation (spec §3 / §4 helper). */
 async function calculateTotalDiversificationCount(query: Record<string, any>) {
@@ -614,9 +638,247 @@ export async function cancelRequest(
       data: { _id: String(found._id) },
       message: "Request Cancelled Succefully.",
     };
-  } catch {
+  } catch (error) {
+    logFailure("cancelRequest", error, {
+      userId: currentUserId,
+      connectionId: request?.connectionId,
+      requestType: request?.requestType,
+    });
     return { isSuccess: false, message: "Something Went Wrong." };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* PUT /:id/status/:status — accept / reject a request (per contract)   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Business logic for `PUT /:id/status/:status` (source: webapi
+ * `updateConnectionStatus` + Socialmedia `respondFriendRequest`) — MONGO ONLY.
+ *
+ * Entry point → `requestAcceptFlow` / `requestRejectFlow` (same split/name shape
+ * as the source `respondFriendRequest`).
+ *
+ * ⛔ NOT implemented on purpose (contract §7): notification-service calls,
+ *    Firebase notification updates, user-service `POST /connections/add` /
+ *    `remove`, notification/connection queue jobs and the KEDA post-sync publish.
+ * The body `{ notificationId }` is accepted and IGNORED.
+ *
+ * ⚠️ Message spelling/casing differs per branch ON PURPOSE (contract §3).
+ */
+export async function updateConnectionStatus(
+  requestId: string,
+  status: string,
+  currentUserId: string
+): Promise<ResponseModel<any>> {
+  try {
+    if (status === "accept") {
+      return await requestAcceptFlow(requestId, currentUserId);
+    }
+    if (status === "reject") {
+      return await requestRejectFlow(requestId, currentUserId);
+    }
+    // ⚠️ typo preserved: "Invald Request Type" (no trailing period)
+    return { isSuccess: false, message: "Invald Request Type" };
+  } catch (error) {
+    logFailure("updateConnectionStatus", error, { requestId, status, userId: currentUserId });
+    return { isSuccess: false, message: "Something Went Wrong." };
+  }
+}
+
+/** Reject branch (contract §5.2) — update `requestStatus` only. */
+async function requestRejectFlow(
+  requestId: string,
+  currentUserId: string
+): Promise<ResponseModel<any>> {
+  try {
+    const request = await findOneConnection({ _id: requestId });
+    // ⚠️ NO null-check on purpose: a missing document throws right here, exactly
+    // like the source, and lands in the catch below ("Something Went wrong").
+    request!.requestStatus = "reject";
+
+    await updateRequestDoc(request);
+
+    if ((request as any).requestType === "followrequest") {
+      return { isSuccess: true, message: "Follow Request Rejected." };
+    }
+    return { isSuccess: true, message: "Friend Request Rejected." };
+  } catch (error) {
+    logFailure("requestRejectFlow", error, { requestId, status: "reject", userId: currentUserId });
+    // ⚠️ exact source casing: lowercase "w", no trailing period.
+    return { isSuccess: false, message: "Something Went wrong" };
+  }
+}
+
+/** Accept dispatcher (contract §5.3). */
+async function requestAcceptFlow(
+  requestId: string,
+  currentUserId: string
+): Promise<ResponseModel<any>> {
+  try {
+    const request = await findOneConnection({ _id: requestId });
+    if (!request) return { isSuccess: false, message: "No Request Found" };
+
+    request.requestStatus = "accept";
+
+    if (request.requestType === "friendrequest") {
+      return await acceptFriendRequestFlow(request, currentUserId);
+    }
+    if (request.requestType === "followrequest") {
+      return await followRequestAcceptFlow(request, currentUserId);
+    }
+    return { isSuccess: false, message: "No Request Found" };
+  } catch (error) {
+    logFailure("requestAcceptFlow", error, { requestId, status: "accept", userId: currentUserId });
+    // ⚠️ lowercase "s" + the raw error in `data` (source behaviour).
+    return { isSuccess: false, message: "something went wrong", data: error };
+  }
+}
+
+/**
+ * Accept · `friendrequest` (contract §5.4) — edges in BOTH directions + counts.
+ *
+ * ⚠️ Name note: this is NOT called `friendRequestAcceptFlow` because that name is
+ * already taken by the pre-existing addConnection auto-accept helper further down
+ * this file — two same-named function declarations would silently override each
+ * other (the LAST one wins), which is exactly what happened once.
+ */
+async function acceptFriendRequestFlow(
+  request: any,
+  currentUserId: string
+): Promise<ResponseModel<any>> {
+  const requester = String(request.userId); // A
+  const target = String(request.connectionId); // B
+
+  const [requesterUser, targetUser] = [await getUser(requester), await getUser(target)];
+
+  // 1. existing FRIEND edges (either direction) …
+  const friendRows = await findConnections({
+    requestType: "friends",
+    $or: [
+      { userId: requester, connectionId: target },
+      { userId: target, connectionId: requester },
+    ],
+  });
+  const friendFirst = friendRows.filter((r: any) => r.userId === requester);
+  const friendSecond = friendRows.filter((r: any) => r.connectionId === requester);
+
+  // 2./3. … create the missing ones (upsert).
+  if (friendFirst.length === 0) {
+    await upsertAcceptedConnection(requester, target, "friends", request.relationType, requesterUser, targetUser);
+  }
+  if (friendSecond.length === 0) {
+    await upsertAcceptedConnection(target, requester, "friends", request.relationType, targetUser, requesterUser);
+  }
+
+  // 4. existing FOLLOWING edges (either direction) …
+  const followingRows = await findConnections({
+    requestType: "following",
+    $or: [
+      { userId: requester, connectionId: target },
+      { userId: target, connectionId: requester },
+    ],
+  });
+  const followingFirst = followingRows.filter((r: any) => r.userId === requester);
+  const followingSecond = followingRows.filter((r: any) => r.connectionId === requester);
+
+  // 5./6. … create the missing ones (upsert).
+  if (followingFirst.length === 0) {
+    await upsertAcceptedConnection(requester, target, "following", request.relationType, requesterUser, targetUser);
+    // Local NATS contract: EVERY new follow edge is announced (same as /addConnection).
+    void publishSocialFollowed(requester, target);
+  }
+  if (followingSecond.length === 0) {
+    await upsertAcceptedConnection(target, requester, "following", request.relationType, targetUser, requesterUser);
+    void publishSocialFollowed(target, requester);
+  }
+
+  // 7. request doc → accept
+  await updateRequestDoc(request);
+
+  // 8. counts (§9 diagram) + response
+  await updateFriendAndFollowerCount(requester, target);
+  return { isSuccess: true, message: "Friend Request Accepted." };
+}
+
+/**
+ * Accept · `followrequest` (contract §5.5) — status + counts ONLY, NO edges.
+ *
+ * ⚠️ PRESERVED SOURCE BEHAVIOUR (contract §5.5 steps 2 & 4): `checkIfFollowingExists`
+ * returns an OBJECT (always truthy), so `!following1` / `!following2` are NEVER
+ * true and the add-following calls never run. Do NOT "fix" this.
+ */
+async function followRequestAcceptFlow(
+  request: any,
+  currentUserId: string
+): Promise<ResponseModel<any>> {
+  const requester = String(request.userId); // A
+  const target = String(request.connectionId); // B
+
+  const following1 = await checkIfFollowingExists(requester, target);
+  const following2 = await checkIfFollowingExists(target, requester);
+  if (!following1 || !following2) {
+    // Unreachable by design — kept so the source guard stays visible.
+    console.log(
+      "[connections] follow-request accept: addFollowing branch skipped (preserved behaviour)"
+    );
+  }
+
+  await updateRequestDoc(request);
+  await updateFriendAndFollowerCount(requester, target);
+  return { isSuccess: true, message: "Follow Request Accepted." };
+}
+
+/**
+ * `$set` the whole request document (all fields except `_id`) plus
+ * `modifiedOn` / `modifiedBy`, exactly like the source (§5.2 step 3).
+ */
+async function updateRequestDoc(request: any): Promise<void> {
+  const { _id, ...fields } = request;
+  await updateConnection(
+    { _id },
+    { $set: { ...fields, modifiedOn: Date.now(), modifiedBy: "" } }
+  );
+}
+
+/**
+ * Upsert one friends/following edge created by an ACCEPTED request (§5.4).
+ * `_id` is the current epoch-millis string and the denormalized fields come from
+ * the `users` collection — same shape the source wrote.
+ */
+async function upsertAcceptedConnection(
+  ownerId: string,
+  otherId: string,
+  requestType: "friends" | "following",
+  relationType: string | undefined,
+  owner: any,
+  other: any
+): Promise<void> {
+  const now = Date.now();
+  const doc = {
+    createdOn: now,
+    modifiedOn: now,
+    userId: ownerId,
+    userName: owner?.userName,
+    userFullName: owner?.fullName,
+    userCountry: owner?.country,
+    userProfilePicture: owner?.profilePicture,
+    userGender: owner?.gender,
+    userCoverPhoto: owner?.coverPhoto,
+    connectionId: otherId,
+    connectionName: other?.fullName,
+    connectionCountry: other?.country,
+    connectionUsername: other?.userName,
+    connectionProfilePicture: other?.profilePicture,
+    connectionGender: other?.gender,
+    connectionCoverPhoto: other?.coverPhoto,
+    relationType,
+    requestType,
+    // friends docs carry "accept" (same as the source addFriend helper).
+    ...(requestType === "friends" ? { requestStatus: "accept" } : {}),
+  };
+
+  await upsertConnection({ _id: String(now) }, { $set: doc });
 }
 
 async function updateFriendAndFollowerCount(userId: string, connectionId: string) {
@@ -649,7 +911,19 @@ async function getUserConnections(id: string) {
   });
   const followersCount = [...new Set(followerDocs.map((x: any) => x.userId))].length;
 
-  await updateUser({ _id: id }, { $set: { friendCount, followingCount, followersCount } });
+  await updateUser(
+    { _id: id },
+    {
+      $set: {
+        friendCount,
+        followingCount,
+        followersCount,
+        // §5.6 step 4 — source also stamps these two fields.
+        modifiedOn: Date.now(),
+        modifiedBy: "",
+      },
+    }
+  );
 }
 
 async function getBlockedIds(userId: string): Promise<string[]> {

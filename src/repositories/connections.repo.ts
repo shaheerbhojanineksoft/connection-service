@@ -68,3 +68,11 @@ export async function updateConnection(
 ): Promise<void> {
   await (await connections()).updateOne(filter, update);
 }
+
+/** Upsert variant — the accept flows write their new friend/following edges this way. */
+export async function upsertConnection(
+  filter: Record<string, any>,
+  update: Document
+): Promise<void> {
+  await (await connections()).updateOne(filter, update, { upsert: true });
+}

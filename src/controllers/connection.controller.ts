@@ -12,6 +12,7 @@ import {
   getUserPhotos,
   unblockUser,
   unfollow,
+  updateConnectionStatus,
   userFriendsAndFollowingCount,
 } from "../services/connection.service";
 
@@ -287,6 +288,34 @@ export const connectionController = authInterceptor(new Elysia())
           "matching documents, returning the `_id` of the request found. The " +
           "source route has no validation: an unknown `requestType` just results " +
           "in 'No Request Found.' No notification/Firebase/user-service calls.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .put(
+    "/:id/status/:status",
+    async ({ params, userId }) => {
+      // `notificationId` in the body is accepted and IGNORED (notification work removed).
+      // userId comes from the token; :id is the connection REQUEST document _id.
+      return await updateConnectionStatus(params.id, params.status, userId);
+    },
+    {
+      params: t.Object({ id: t.String(), status: t.String() }),
+      body: t.Optional(
+        t.Object(
+          { notificationId: t.Optional(t.Any()) },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Accept or reject a connection request",
+        description:
+          "Mongo-only. `accept`: `friendrequest` also ensures the friends + " +
+          "following edges in both directions; `followrequest` only sets the " +
+          "status. Both recompute the cached counts. `reject`: only sets " +
+          "`requestStatus`. Any other status returns 'Invald Request Type'. " +
+          "No notification/Firebase/user-service/queue work.",
         security: [{ bearerAuth: [] }],
       },
     }
