@@ -15,15 +15,18 @@ import {
 } from "../repositories/blocked.repo";
 import {
   aggregateConnections,
+  connectionIdLookupForms,
   countConnections,
   deleteConnections,
   findConnections,
   findOneConnection,
+  findOneConnectionById,
   insertConnection,
   updateConnection,
   upsertConnection,
 } from "../repositories/connections.repo";
 import { findCircles } from "../repositories/circles.repo";
+import { constants } from "../config/constants";
 import { findPhotos } from "../repositories/photos.repo";
 import { deleteTopFriends } from "../repositories/topfriends.repo";
 import { findManyUsers, findOneUser, updateUser } from "../repositories/users.repo";
@@ -746,7 +749,7 @@ async function requestRejectFlow(
   currentUserId: string
 ): Promise<ResponseModel<any>> {
   try {
-    const request = await findOneConnection({ _id: requestId });
+    const request = await findOneConnectionById(requestId);
     // ⚠️ NO null-check on purpose: a missing document throws right here, exactly
     // like the source, and lands in the catch below ("Something Went wrong").
     request!.requestStatus = "reject";
@@ -770,8 +773,17 @@ async function requestAcceptFlow(
   currentUserId: string
 ): Promise<ResponseModel<any>> {
   try {
-    const request = await findOneConnection({ _id: requestId });
-    if (!request) return { isSuccess: false, message: "No Request Found" };
+    const request = await findOneConnectionById(requestId);
+    if (!request) {
+      // Not an error in itself — but the ONLY way to see which id forms were
+      // tried when a client sends an id we cannot match.
+      console.warn(
+        `[connections] ⚠️ updateConnectionStatus accept: no request for id="${requestId}" ` +
+          `(lookup tried: ${connectionIdLookupForms(requestId).join(", ") || "none"}, ` +
+          `collection="connections" of ${constants.DATABASE_NAME})`
+      );
+      return { isSuccess: false, message: "No Request Found" };
+    }
 
     request.requestStatus = "accept";
 
