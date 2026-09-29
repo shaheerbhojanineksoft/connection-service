@@ -137,8 +137,12 @@ export const circlesController = authInterceptor(new Elysia())
   .post(
     "/circles",
     async ({ body, set, userId }) => {
-      const payload = body as AddCircleDTO;
-      payload.createdBy = userId; // always from the token
+      // No ValidationPipe in the source: a missing body behaves like `{}` and the
+      // service answers "Invalid input data" — never a 500.
+      const payload: AddCircleDTO = {
+        ...(body as AddCircleDTO | undefined),
+        createdBy: userId, // always from the token
+      };
       const result = await addCircle(payload);
       set.status = 201; // NestJS default for POST (business errors still 201)
       return result;
@@ -166,9 +170,11 @@ export const circlesController = authInterceptor(new Elysia())
   .put(
     "/circles/:id",
     async ({ body, params, userId }) => {
-      const payload = body as EditCircleDTO;
-      payload.circleId = params.id;
-      payload.userId = userId;
+      const payload: EditCircleDTO = {
+        ...(body as EditCircleDTO | undefined),
+        circleId: params.id,
+        userId,
+      };
       return await editCircle(payload);
     },
     {
@@ -208,9 +214,11 @@ export const circlesController = authInterceptor(new Elysia())
   .post(
     "/circles/:id/addmember",
     async ({ body, params, set, userId }) => {
-      const payload = body as AddRemoveCircleMemberDTO;
-      payload.circleId = params.id;
-      payload.userId = userId;
+      const payload: AddRemoveCircleMemberDTO = {
+        ...(body as AddRemoveCircleMemberDTO | undefined),
+        circleId: params.id,
+        userId,
+      };
       const result = await addCircleMember(payload);
       set.status = 201;
       return result;
@@ -234,9 +242,11 @@ export const circlesController = authInterceptor(new Elysia())
   .put(
     "/circles/:id/removemember",
     async ({ body, params, userId }) => {
-      const payload = body as AddRemoveCircleMemberDTO;
-      payload.circleId = params.id;
-      payload.userId = userId;
+      const payload: AddRemoveCircleMemberDTO = {
+        ...(body as AddRemoveCircleMemberDTO | undefined),
+        circleId: params.id,
+        userId,
+      };
       return await removeCircleMember(payload);
     },
     {

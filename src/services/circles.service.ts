@@ -46,6 +46,32 @@ function genericError(): ResponseModel<any> {
   return fail("Something went wrong");
 }
 
+/**
+ * Failure log — the raw error is the ONLY thing that tells us WHY a handler
+ * answered "Something went wrong". Printed before the envelope is returned.
+ *
+ * Mongo error codes seen most often:
+ *   11000 → duplicate key (a UNIQUE index exists on the collection)
+ *   121   → document failed the collection's $jsonSchema validation
+ *   13    → not authorized (Mongo user rights on the collection)
+ *   8000+ → Atlas errors, 50/89 → network / maxTimeMS
+ */
+function logFailure(
+  operation: string,
+  error: unknown,
+  context: Record<string, unknown> = {}
+): void {
+  const e = error as
+    | { name?: string; message?: string; code?: string | number; stack?: string }
+    | undefined;
+  console.error(
+    `[circles] ❌ ${operation} failed (name=${e?.name ?? "Error"}, code=${
+      e?.code ?? "-"
+    }) context=${JSON.stringify(context)}: ${e?.message ?? String(error)}`
+  );
+  if (e?.stack) console.error(`[circles] ${operation} stack:\n${e.stack}`);
+}
+
 /** Never persist/return credentials stored on raw user documents. */
 function sanitizeUser(user: Record<string, any>): any {
   const copy = { ...user };
@@ -98,7 +124,8 @@ export async function getCirclesByUserId(
     }
 
     return ok(circles, "Circles found");
-  } catch {
+  } catch (error) {
+    logFailure("getCirclesByUserId", error, { userId, page, count });
     return genericError();
   }
 }
@@ -171,7 +198,8 @@ export async function getConnectionsForCircle(
     });
 
     return ok(data, "Connections Found");
-  } catch {
+  } catch (error) {
+    logFailure("getConnectionsForCircle", error, { userId, circleId, page, count });
     return genericError();
   }
 }
@@ -190,7 +218,8 @@ export async function getCircleById(
     if (!circle || circle.isDeleted === true) return fail("Circle not found");
     if (circle.userId !== userId) return fail("You are not authorized");
     return ok(circle, "Circle found");
-  } catch {
+  } catch (error) {
+    logFailure("getCircleById", error, { circleId, userId });
     return genericError();
   }
 }
@@ -201,11 +230,14 @@ export async function getCircleById(
 
 /** Business logic for `POST /circles` (TCP `addCircle`). */
 export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
+  // Which step blew up — reported in the failure log.
+  let step: "validate" | "members" | "insert" = "validate";
   try {
     const { hexColor, memberIds } = data;
     if (!data.name || !hexColor) return fail("Invalid input data");
     const name = String(data.name).trim();
     const createdBy = data.createdBy ?? "";
+    step = "members";
 
     // ⚠️ CAVEAT §6.1: the source duplicate-name guard checks `res.success`
     // (a non-existent property) so it NEVER blocks create/update. Preserved:
@@ -232,6 +264,7 @@ export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
       modifiedBy: "",
     };
 
+    step = "insert";
     const inserted = await insertCircle(circle);
     if (!inserted?._id) return fail("Failed to create circle");
 
@@ -240,7 +273,14 @@ export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
     void publishSocialCircleCreated(String(inserted._id), String(name));
 
     return ok(inserted, "Circle created successfully");
-  } catch {
+  } catch (error) {
+    logFailure("addCircle", error, {
+      step,
+      userId: data?.createdBy,
+      name: data?.name,
+      hexColor: data?.hexColor,
+      memberIds: Array.isArray(data?.memberIds) ? data.memberIds.length : 0,
+    });
     return genericError();
   }
 }
@@ -268,7 +308,8 @@ export async function editCircle(data: EditCircleDTO): Promise<ResponseModel> {
     const updated = await findOneCircle({ _id: circleId });
     if (!updated) return fail("Failed to update circle", {});
     return ok(updated, "Circle updated successfully");
-  } catch {
+  } catch (error) {
+    logFailure("editCircle", error, { circleId: data?.circleId, userId: data?.userId, name: data?.name });
     // §4.5 failure shape for this handler uses `data: {}`.
     return fail("Failed to update circle", {});
   }
@@ -296,7 +337,8 @@ export async function deleteCircleById(
     void publishSocialCircleDeleted(String(circleId));
 
     return ok(null, "Circle deleted successfully");
-  } catch {
+  } catch (error) {
+    logFailure("deleteCircleById", error, { circleId, userId });
     return fail("Failed to delete circle");
   }
 }
@@ -336,7 +378,12 @@ export async function addCircleMember(
     }
 
     return ok(updated ?? { ...circle, members }, "Members Added To Circle");
-  } catch {
+  } catch (error) {
+    logFailure("addCircleMember", error, {
+      circleId: data?.circleId,
+      userId: data?.userId,
+      memberIds: Array.isArray(data?.memberIds) ? data.memberIds.length : 0,
+    });
     return genericError();
   }
 }
@@ -374,7 +421,12 @@ export async function removeCircleMember(
     }
 
     return ok(updated ?? { ...circle, members }, "Members Removed From Circle");
-  } catch {
+  } catch (error) {
+    logFailure("removeCircleMember", error, {
+      circleId: data?.circleId,
+      userId: data?.userId,
+      memberIds: Array.isArray(data?.memberIds) ? data.memberIds.length : 0,
+    });
     return genericError();
   }
 }
@@ -400,7 +452,8 @@ export async function validateCircleName(
 
     if (existing) return fail("Circle name already exists");
     return ok(null, "Circle name is available");
-  } catch {
+  } catch (error) {
+    logFailure("validateCircleName", error, { userId, name });
     return genericError();
   }
 }
