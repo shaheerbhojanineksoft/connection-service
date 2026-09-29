@@ -2,10 +2,12 @@ import { Elysia, t } from "elysia";
 
 import { authInterceptor } from "../interceptors/auth.interceptor";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
+import type { CancelRequestDTO } from "../dto/cancel-request.dto";
 import {
   addConnection,
   blockUser,
   blockedUsersListing,
+  cancelRequest,
   getConnections,
   getUserPhotos,
   unblockUser,
@@ -246,6 +248,45 @@ export const connectionController = authInterceptor(new Elysia())
         description:
           "Removes the block edge owned by the current user for `blockedId` and " +
           "recomputes cached counts for both users.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/cancelrequest",
+    async ({ body, set, userId }) => {
+      // The source route has NO ValidationPipe: a missing body behaves like `{}`
+      // (NestJS) and simply finds no request — never a 400/422/500.
+      // userId always from the token — a body `userId` is ignored/replaced.
+      const payload: CancelRequestDTO = {
+        ...(body as CancelRequestDTO | undefined),
+        userId,
+      };
+      // No logic here — just call the service and return its response.
+      const result = await cancelRequest(userId, payload);
+      set.status = 201; // NestJS default for POST (not-found/error also return 201)
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object(
+          {
+            connectionId: t.Optional(t.Any()),
+            requestType: t.Optional(t.Any()),
+            userId: t.Optional(t.Any()),
+          },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Cancel a pending connection request",
+        description:
+          "Finds ONE pending request (`connections` collection: userId + " +
+          "connectionId + requestType + requestStatus 'pending') and deletes ALL " +
+          "matching documents, returning the `_id` of the request found. The " +
+          "source route has no validation: an unknown `requestType` just results " +
+          "in 'No Request Found.' No notification/Firebase/user-service calls.",
         security: [{ bearerAuth: [] }],
       },
     }

@@ -5,6 +5,7 @@ import {
 } from "../repositories/userView.repo";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
 import type { GetConnectionsDTO } from "../dto/get-connections.dto";
+import type { CancelRequestDTO } from "../dto/cancel-request.dto";
 import {
   deleteBlocked,
   findBlocked,
@@ -17,6 +18,7 @@ import {
   countConnections,
   deleteConnections,
   findConnections,
+  findOneConnection,
   insertConnection,
   updateConnection,
 } from "../repositories/connections.repo";
@@ -553,6 +555,67 @@ export async function unfollow(currentUserId: string, connectionId: string) {
     console.error("Error Message :", error.message);
     // ⚠️ TYPO preserved — "Somthing Went Wrong."
     return { isSuccess: false, message: "Somthing Went Wrong." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /cancelrequest — cancel a pending request (per source spec)     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Business logic for POST /cancelrequest (per integration contract — the
+ * SINGLE-SERVICE implementation).
+ *
+ * ONLY the core cancellation work is implemented:
+ *   1. find ONE `connections` document matching
+ *      `{ userId, connectionId, requestType, requestStatus: "pending" }`,
+ *   2. `deleteMany` with the very same query,
+ *   3. return the found document's `_id`.
+ *
+ * ⛔ NOT implemented on purpose (agreed scope change):
+ *   - notification-service HTTP call,
+ *   - Firebase `deleteFollowRequestNotification` / `deleteFriendRequestNotification`,
+ *   - user-service `POST /connections/remove`.
+ *   - no NATS publish either (nothing in the contract asks for an event).
+ *
+ * Request  → `{ connectionId, requestType }` (userId from the access token)
+ * Response → success `{ isSuccess: true, data: { _id }, message: "Request Cancelled Succefully." }`
+ *            not found / error → `{ isSuccess: false, message: ... }` (NO `data` key)
+ * ⚠️ Message spelling preserved exactly: "Request Cancelled Succefully."
+ */
+export async function cancelRequest(
+  currentUserId: string,
+  request: CancelRequestDTO
+): Promise<ResponseModel<{ _id: string }>> {
+  try {
+    // `requestStatus` is hardcoded — only PENDING requests can be cancelled.
+    const query = {
+      userId: currentUserId,
+      connectionId: request.connectionId,
+      requestType: request.requestType,
+      requestStatus: "pending",
+    };
+
+    // 1. find ONE pending request (its _id is what the client gets back).
+    const found = await findOneConnection(query);
+    if (!found) {
+      // `data` stays undefined → the key is absent in the JSON body.
+      return { isSuccess: false, message: "No Request Found." };
+    }
+
+    // 2. delete ALL documents matching the same query.
+    await deleteConnections(query);
+
+    // 3. response — the _id of the document found BEFORE the delete
+    //    (String() keeps the JSON identical whether `_id` is an ObjectId or
+    //    a string in the collection).
+    return {
+      isSuccess: true,
+      data: { _id: String(found._id) },
+      message: "Request Cancelled Succefully.",
+    };
+  } catch {
+    return { isSuccess: false, message: "Something Went Wrong." };
   }
 }
 

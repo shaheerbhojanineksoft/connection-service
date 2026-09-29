@@ -19,6 +19,13 @@ export async function findConnections(
   return (await connections()).find(filter, { projection }).toArray();
 }
 
+/** Single-document lookup (used by cancelrequest to read the pending request). */
+export async function findOneConnection(
+  filter: Record<string, any>
+): Promise<Document | null> {
+  return (await connections()).findOne(filter);
+}
+
 export interface ConnectionQueryOpts {
   sort?: Record<string, 1 | -1>;
   skip?: number;
