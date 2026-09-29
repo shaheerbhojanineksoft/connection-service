@@ -1,10 +1,44 @@
 /**
  * All environment variables / constants used by the Connection Service.
  */
+
+/** Boolean env var — accepts true/false, 1/0, yes/no, on/off; blank ⇒ fallback. */
+function parseBool(raw: string | undefined, fallback: boolean): boolean {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "") return fallback;
+  if (["true", "1", "yes", "on"].includes(value)) return true;
+  if (["false", "0", "no", "off"].includes(value)) return false;
+  throw new Error(
+    `[config] Environment variable must be a boolean (got "${raw}") — use true/false.`
+  );
+}
+
 export const constants = {
   // --- Mongo (single DB per service convention) ---
   DATABASE_URL: process.env.DATABASE_URL ?? "mongodb://localhost:27017",
   DATABASE_NAME: process.env.DATABASE_NAME ?? "Traderverse-connections",
+
+  // --- Auth mode (who verifies the user's token) ---
+  // true  (DEFAULT, unchanged) → APISIX (openid-connect) verified the token and
+  //         injects `X-Userinfo`: the protected routes only read that header.
+  // false → no gateway in front: THIS service verifies the raw
+  //         `Authorization: Bearer <token>` itself against Keycloak's JWKS
+  //         (signature + `iss` + expiry) and takes the identity from the
+  //         VERIFIED claims. `X-Userinfo` is IGNORED in this mode — trusting it
+  //         would let any caller impersonate any user.
+  // (Same flag/semantics as user-and-identity-service.)
+  GATEWAY_AUTH_ENABLED: parseBool(process.env.GATEWAY_AUTH_ENABLED, true),
+  // --- Keycloak issuer (only used when GATEWAY_AUTH_ENABLED=false) ---
+  KEYCLOAK_BASE_URL: process.env.KEYCLOAK_BASE_URL ?? "",
+  KEYCLOAK_REALM_NAME: process.env.KEYCLOAK_REALM_NAME ?? "",
+  // Optional: explicit JWKS endpoint and extra accepted `iss` values
+  // (comma separated). Blank ⇒ derived from the issuer above.
+  KEYCLOAK_JWKS_URL: process.env.KEYCLOAK_JWKS_URL ?? "",
+  KEYCLOAK_ISSUERS: process.env.KEYCLOAK_ISSUERS ?? "",
+  // Tolerated clock skew (seconds) when verifying a Keycloak token locally.
+  KEYCLOAK_CLOCK_TOLERANCE_SECONDS: Number(
+    process.env.KEYCLOAK_CLOCK_TOLERANCE_SECONDS ?? 5
+  ),
 
   // --- NATS: social graph events (per feed-data-sync-service contract) ---
   // Same local cluster as user-and-identity-service; anonymous connect is
