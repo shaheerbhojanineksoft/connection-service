@@ -37,27 +37,23 @@ const BAD_REQUEST = { error: "Bad Request" as const };
 /**
  * Normalise the `userIds` field of `POST /connectionssummary`.
  *
- * Accepts a single id (`"u1"`) OR a non-empty list (`["u1","u2"]`) — the
- * minimum is ONE id. Mirrors the house manual-400 style (the body schema keeps
- * the field `t.Any()` so a wrong shape never leaks an Elysia 422).
+ * The payload MUST always be an ARRAY OF STRINGS — one id (`["u1"]`) or many
+ * (`["u1","u2"]`) — but at least ONE non-empty entry is required.
+ *
+ * The route schema already enforces the array-of-strings SHAPE (a wrong shape is
+ * rewritten to this same 400 body by the `onError` hook below), so this helper
+ * only covers the cases the schema cannot: missing/empty array and blank ids.
  */
 function normalizeUserIds(body: unknown): { ids: string[]; messages: string[] } {
   const raw = (body as { userIds?: unknown } | undefined)?.userIds;
 
-  // missing / null → nothing to check
+  // missing / null
   if (raw === undefined || raw === null) {
     return { ids: [], messages: ["userIds should not be empty"] };
   }
 
-  // single-id form
-  if (typeof raw === "string") {
-    const single = raw.trim();
-    if (!single) return { ids: [], messages: ["userIds should not be empty"] };
-    return { ids: [single], messages: [] };
-  }
-
   if (!Array.isArray(raw)) {
-    return { ids: [], messages: ["userIds must be a string or an array of strings"] };
+    return { ids: [], messages: ["userIds must be an array of strings"] };
   }
   if (raw.length === 0) {
     return { ids: [], messages: ["userIds should not be empty"] };
@@ -74,6 +70,18 @@ function normalizeUserIds(body: unknown): { ids: string[]; messages: string[] } 
 }
 
 /**
+ * Swagger dummy values for `POST /connectionssummary` (documentation only).
+ *
+ * ⚠️ Used via `example` — NEVER via `default`: Elysia APPLIES a TypeBox
+ * `default` to the parsed body, which would silently invent ids for a request
+ * that sent none and bypass the "userIds should not be empty" 400.
+ */
+const CONNECTIONS_SUMMARY_USER_IDS_EXAMPLE = [
+  "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "9c858901-8a57-4791-81fe-4c455b099bc9",
+];
+
+/**
  * Protected connection endpoints (Bearer token → APISIX injects X-Userinfo).
  * `authInterceptor` makes `userId` available to every handler and rejects
  * with 401 when the identity header is missing/invalid.
@@ -86,6 +94,28 @@ function normalizeUserIds(body: unknown): { ids: string[]; messages: string[] } 
  *        { detail: { tags: ["Connections"], summary: "...", security: [{ bearerAuth: [] }] } })
  */
 export const connectionController = authInterceptor(new Elysia())
+  /**
+   * `POST /connectionssummary` is the ONLY route here with a strict body schema,
+   * so a wrong payload shape would otherwise leak Elysia's raw 422. Rewrite that
+   * ONE failure into the house NestJS-style 400. Every other route/error falls
+   * through UNCHANGED (returning `undefined` keeps Elysia's default handling).
+   */
+  .onError(({ code, path, body, set }) => {
+    if (code === "VALIDATION" && String(path ?? "").endsWith("/connectionssummary")) {
+      const raw = (body as { userIds?: unknown } | undefined)?.userIds;
+      set.status = 400;
+      return {
+        statusCode: 400,
+        message: [
+          raw === undefined || raw === null
+            ? "userIds should not be empty" // absent / null — same wording as `{}`
+            : "userIds must be an array of strings", // wrong shape (string / number / …)
+        ],
+        ...BAD_REQUEST,
+      };
+    }
+    return undefined;
+  })
   .get(
     "/blockedusers",
     async ({ userId }) => {
@@ -381,7 +411,7 @@ export const connectionController = authInterceptor(new Elysia())
   .post(
     "/connectionssummary",
     async ({ body, set, userId }) => {
-      // Minimum ONE id required; a single id and an array are both accepted.
+      // Payload is ALWAYS an array of strings (one id or many); minimum ONE id.
       const { ids, messages } = normalizeUserIds(body);
       if (messages.length) {
         set.status = 400;
@@ -395,7 +425,23 @@ export const connectionController = authInterceptor(new Elysia())
     {
       body: t.Optional(
         t.Object(
-          { userIds: t.Optional(t.Any()) },
+          {
+            // `userIds` is ALWAYS an array of strings (1..n) — never a bare string.
+            // NOTE: `example`/`examples` are documentation only; do NOT add a
+            // `default` (Elysia would inject it into the parsed body).
+            userIds: t.Optional(
+              t.Array(
+                t.String(),
+                {
+                  example: CONNECTIONS_SUMMARY_USER_IDS_EXAMPLE,
+                  examples: [CONNECTIONS_SUMMARY_USER_IDS_EXAMPLE],
+                  description:
+                    "One or many user ids (MUST be an array of strings; " +
+                    "at least one non-empty id required).",
+                } as any
+              )
+            ),
+          },
           { additionalProperties: true }
         )
       ),
@@ -403,7 +449,7 @@ export const connectionController = authInterceptor(new Elysia())
         tags: ["Connections"],
         summary: "Batch relation summary for one or many user ids",
         description:
-          "Read-only. For every id sent in `userIds` (single id or array, " +
+          "Read-only. For every id sent in the `userIds` ARRAY (one id or many, " +
           "minimum one required) returns the relation with the authenticated " +
           "user: isFriend, isFollowing (me→them), isFollowedBy (them→me), " +
           "isRequestSent / isRequestReceived (pending friendrequest), " +
