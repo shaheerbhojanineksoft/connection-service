@@ -37,6 +37,11 @@ import {
   publishSocialUnfollowed,
 } from "./nats.publisher";
 import type { BlockedUserDocument, ResponseModel } from "../types/block-user.types";
+import type {
+  ConnectionRelation,
+  ConnectionSummaryData,
+  ConnectionSummaryEntry,
+} from "../types/connection-summary.types";
 
 /**
  * Failure log — the response envelope must stay unchanged, so the ONLY place the
@@ -1470,5 +1475,173 @@ export async function getConnections(data: GetConnectionsDTO) {
     return { isSuccess: true, data: connections, message: "" };
   } catch {
     return { isSuccess: false, data: null, message: "Something Went Wrong." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /connectionssummary — batch relation summary (NEW, service-    */
+/* internal: no external service, no writes, all direct Mongo).        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Derived `relation` precedence — first match wins.
+ * A block always wins (it is the strongest state), then friendship, then the
+ * pending requests (received before sent — the one that needs an action), then
+ * the follow directions.
+ */
+function resolveConnectionRelation(entry: {
+  isSelf: boolean;
+  isBlocked: boolean;
+  isBlockedBy: boolean;
+  isFriend: boolean;
+  isRequestReceived: boolean;
+  isRequestSent: boolean;
+  isFollowRequestReceived: boolean;
+  isFollowRequestSent: boolean;
+  isFollowing: boolean;
+  isFollowedBy: boolean;
+}): ConnectionRelation {
+  if (entry.isSelf) return "self";
+  if (entry.isBlocked) return "blocked";
+  if (entry.isBlockedBy) return "blocked_by";
+  if (entry.isFriend) return "friends";
+  if (entry.isRequestReceived) return "request_received";
+  if (entry.isRequestSent) return "request_sent";
+  if (entry.isFollowRequestReceived) return "follow_request_received";
+  if (entry.isFollowRequestSent) return "follow_request_sent";
+  if (entry.isFollowing && entry.isFollowedBy) return "mutual_follow";
+  if (entry.isFollowing) return "following";
+  if (entry.isFollowedBy) return "follower";
+  return "none";
+}
+
+/**
+ * Business logic for POST /connectionssummary.
+ *
+ * Client sends one id or many ids; the service reports, for EACH of them, the
+ * relation with the AUTHENTICATED user (friend / following / follower / pending
+ * request in either direction / blocked, both directions).
+ *
+ * READ-ONLY: `connections` (edges + pending request `_id`s), `blocked` (both
+ * directions) and `users` (display enrichment). No counts are recomputed and
+ * nothing is written — `updatedOn`/counts stay untouched.
+ *
+ * ⚠️ The viewer id (`currentUserId`) ALWAYS comes from the access token.
+ */
+export async function getConnectionsSummary(
+  currentUserId: string,
+  userIds: string[]
+): Promise<ResponseModel<ConnectionSummaryData>> {
+  try {
+    // 0. normalise — de-duplicate, drop blank entries, keep the client order.
+    const targetIds = [
+      ...new Set(
+        (Array.isArray(userIds) ? userIds : [])
+          .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+          .map((id) => id.trim())
+      ),
+    ];
+    if (!targetIds.length) {
+      return { isSuccess: false, message: "userIds should not be empty" };
+    }
+
+    const me = String(currentUserId);
+
+    // 1. display enrichment (requested ids only — never the whole collection).
+    const profiles = await findManyUsers({ _id: { $in: targetIds } });
+    const profileMap = new Map(profiles.map((u: any) => [String(u._id), u]));
+
+    // 2. every `connections` edge between me and the requested ids, BOTH directions.
+    const edges = await findConnections({
+      $or: [
+        { userId: me, connectionId: { $in: targetIds } },
+        { userId: { $in: targetIds }, connectionId: me },
+      ],
+    });
+
+    // 3. blocks, BOTH directions.
+    const [iBlocked, blockedMe] = await Promise.all([
+      findBlocked({ userId: me, blockedId: { $in: targetIds } }),
+      findBlocked({ userId: { $in: targetIds }, blockedId: me }),
+    ]);
+    const iBlockedSet = new Set(iBlocked.map((b: any) => String(b.blockedId)));
+    const blockedMeSet = new Set(blockedMe.map((b: any) => String(b.userId)));
+
+    // 4. bucket the edges per requested id (target = the id that is NOT me).
+    const friendSet = new Set<string>();
+    const followingSet = new Set<string>();
+    const followedBySet = new Set<string>();
+    const requestSentMap = new Map<string, any>();
+    const requestReceivedMap = new Map<string, any>();
+    const followRequestSentMap = new Map<string, any>();
+    const followRequestReceivedMap = new Map<string, any>();
+
+    for (const edge of edges) {
+      const owner = String(edge.userId);
+      const other = String(edge.connectionId);
+      const target = owner === me ? other : owner;
+      if (target === me) continue; // self edge — no relation
+      const isPending = edge.requestStatus === "pending";
+
+      switch (edge.requestType) {
+        case "friends":
+          friendSet.add(target);
+          break;
+        case "following":
+          if (owner === me) followingSet.add(target);
+          else followedBySet.add(target);
+          break;
+        case "friendrequest":
+          // only a PENDING request is a live relation (accept/reject are history).
+          if (!isPending) break;
+          if (owner === me) requestSentMap.set(target, edge);
+          else requestReceivedMap.set(target, edge);
+          break;
+        case "followrequest":
+          if (!isPending) break;
+          if (owner === me) followRequestSentMap.set(target, edge);
+          else followRequestReceivedMap.set(target, edge);
+          break;
+        default:
+          break;
+      }
+    }
+
+    // 5. one entry per requested id — order preserved, ALWAYS present.
+    const connections: ConnectionSummaryEntry[] = targetIds.map((id) => {
+      const profile: any = profileMap.get(id);
+      const entry: ConnectionSummaryEntry = {
+        userId: id,
+        isSelf: id === me,
+        userName: profile?.userName,
+        fullName: profile?.fullName,
+        profilePicture: profile?.profilePicture,
+        isFriend: friendSet.has(id),
+        isFollowing: followingSet.has(id),
+        isFollowedBy: followedBySet.has(id),
+        isRequestSent: requestSentMap.has(id),
+        isRequestReceived: requestReceivedMap.has(id),
+        isFollowRequestSent: followRequestSentMap.has(id),
+        isFollowRequestReceived: followRequestReceivedMap.has(id),
+        isBlocked: iBlockedSet.has(id),
+        isBlockedBy: blockedMeSet.has(id),
+        relation: "none",
+        requestSentData: requestSentMap.get(id) ?? null,
+        requestReceiveData: requestReceivedMap.get(id) ?? null,
+        followRequestSentData: followRequestSentMap.get(id) ?? null,
+        followRequestReceiveData: followRequestReceivedMap.get(id) ?? null,
+      };
+      entry.relation = resolveConnectionRelation(entry);
+      return entry;
+    });
+
+    return {
+      isSuccess: true,
+      data: { userId: me, totalCount: connections.length, connections },
+      message: "Connections Found",
+    };
+  } catch (error) {
+    logFailure("getConnectionsSummary", error, { userId: currentUserId, userIds });
+    return { isSuccess: false, message: "Something Went Wrong." };
   }
 }

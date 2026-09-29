@@ -9,6 +9,7 @@ import {
   blockedUsersListing,
   cancelRequest,
   getConnections,
+  getConnectionsSummary,
   getUserPhotos,
   removeFriend,
   unblockUser,
@@ -32,6 +33,45 @@ function validateBlockedId(body: unknown): string[] {
 }
 
 const BAD_REQUEST = { error: "Bad Request" as const };
+
+/**
+ * Normalise the `userIds` field of `POST /connectionssummary`.
+ *
+ * Accepts a single id (`"u1"`) OR a non-empty list (`["u1","u2"]`) — the
+ * minimum is ONE id. Mirrors the house manual-400 style (the body schema keeps
+ * the field `t.Any()` so a wrong shape never leaks an Elysia 422).
+ */
+function normalizeUserIds(body: unknown): { ids: string[]; messages: string[] } {
+  const raw = (body as { userIds?: unknown } | undefined)?.userIds;
+
+  // missing / null → nothing to check
+  if (raw === undefined || raw === null) {
+    return { ids: [], messages: ["userIds should not be empty"] };
+  }
+
+  // single-id form
+  if (typeof raw === "string") {
+    const single = raw.trim();
+    if (!single) return { ids: [], messages: ["userIds should not be empty"] };
+    return { ids: [single], messages: [] };
+  }
+
+  if (!Array.isArray(raw)) {
+    return { ids: [], messages: ["userIds must be a string or an array of strings"] };
+  }
+  if (raw.length === 0) {
+    return { ids: [], messages: ["userIds should not be empty"] };
+  }
+
+  const ids: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      return { ids: [], messages: ["each userId must be a non-empty string"] };
+    }
+    ids.push(item.trim());
+  }
+  return { ids, messages: [] };
+}
 
 /**
  * Protected connection endpoints (Bearer token → APISIX injects X-Userinfo).
@@ -334,6 +374,44 @@ export const connectionController = authInterceptor(new Elysia())
           "recomputes the cached counts for both users (excluding blocked and " +
           "deleted users), then deletes the current user's `topfriends` entry. " +
           "No user-service / notification / Firebase / queue work.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/connectionssummary",
+    async ({ body, set, userId }) => {
+      // Minimum ONE id required; a single id and an array are both accepted.
+      const { ids, messages } = normalizeUserIds(body);
+      if (messages.length) {
+        set.status = 400;
+        return { statusCode: 400, message: messages, ...BAD_REQUEST };
+      }
+      // Read-only query → HTTP 200. userId always from the token.
+      const result = await getConnectionsSummary(userId, ids);
+      set.status = 200;
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object(
+          { userIds: t.Optional(t.Any()) },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Batch relation summary for one or many user ids",
+        description:
+          "Read-only. For every id sent in `userIds` (single id or array, " +
+          "minimum one required) returns the relation with the authenticated " +
+          "user: isFriend, isFollowing (me→them), isFollowedBy (them→me), " +
+          "isRequestSent / isRequestReceived (pending friendrequest), " +
+          "isFollowRequestSent / isFollowRequestReceived (pending followrequest), " +
+          "isBlocked / isBlockedBy, a derived `relation` string, and the raw " +
+          "pending request docs (`_id` needed to accept/reject/cancel). " +
+          "All flags are relative to the token user. No writes, no external " +
+          "service calls.",
         security: [{ bearerAuth: [] }],
       },
     }
