@@ -2,15 +2,9 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import { constants } from "../config/constants";
 
-/**
- * Direct Keycloak token verification for the "no gateway" auth mode
- * (`GATEWAY_AUTH_ENABLED=false`) — same approach as user-and-identity-service.
- *
- * With no APISIX in front, nothing in the request headers can be trusted, so
- * the raw `Authorization: Bearer <token>` is verified HERE against Keycloak's
- * JWKS (signature + `iss` + expiry) and the identity is taken from the VERIFIED
- * claims.
- */
+/* ------------------------------------------------------------------ */
+/* Direct token verification (GATEWAY_AUTH_ENABLED=false)              */
+/* ------------------------------------------------------------------ */
 
 /** Keycloak issuer = {base}/realms/{realm} (with trailing-slash safety). */
 export function getIssuer(): string {
@@ -20,15 +14,9 @@ export function getIssuer(): string {
 
 /** JWKS used to verify a raw Keycloak access token. */
 function getJwksUrl(): string {
-  if (constants.KEYCLOAK_JWKS_URL) return constants.KEYCLOAK_JWKS_URL;
-  if (!constants.KEYCLOAK_BASE_URL || !constants.KEYCLOAK_REALM_NAME) {
-    // Loud in the logs; the interceptor turns the failure into a 401.
-    throw new Error(
-      "[keycloak] GATEWAY_AUTH_ENABLED=false requires KEYCLOAK_BASE_URL + " +
-        "KEYCLOAK_REALM_NAME (or an explicit KEYCLOAK_JWKS_URL)."
-    );
-  }
-  return `${getIssuer()}/protocol/openid-connect/certs`;
+  return (
+    constants.KEYCLOAK_JWKS_URL || `${getIssuer()}/protocol/openid-connect/certs`
+  );
 }
 
 /** Accepted `iss` values — `KEYCLOAK_ISSUERS` (comma separated) or the issuer. */

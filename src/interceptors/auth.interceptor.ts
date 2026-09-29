@@ -5,7 +5,7 @@ import { verifyKeycloakToken } from "../services/keycloak.service";
 
 /**
  * Protected-route interceptor (macro-style) with TWO auth modes, selected by the
- * env flag `GATEWAY_AUTH_ENABLED` (same mechanism as user-and-identity-service):
+ * env flag `GATEWAY_AUTH_ENABLED`:
  *
  *   `true` (DEFAULT) — APISIX gateway flow (unchanged)
  *     APISIX (openid-connect plugin) verifies the Bearer token and injects the

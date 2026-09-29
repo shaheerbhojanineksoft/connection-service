@@ -2,14 +2,49 @@
  * All environment variables / constants used by the Connection Service.
  */
 
-/** Boolean env var — accepts true/false, 1/0, yes/no, on/off; blank ⇒ fallback. */
-function parseBool(raw: string | undefined, fallback: boolean): boolean {
-  const value = (raw ?? "").trim().toLowerCase();
-  if (value === "") return fallback;
-  if (["true", "1", "yes", "on"].includes(value)) return true;
-  if (["false", "0", "no", "off"].includes(value)) return false;
+/* ------------------------------------------------------------------ */
+/* Env readers — the ONLY place `process.env` is touched.              */
+/* (Same helpers/wording as user-and-identity-service.)                */
+/* ------------------------------------------------------------------ */
+
+/** String env var, trimmed. Missing/blank -> `fallback` (structural, not config). */
+function str(key: string, fallback = ""): string {
+  const raw = process.env[key];
+  if (raw === undefined) return fallback;
+  const value = raw.trim();
+  return value === "" ? fallback : value;
+}
+
+/** Required string — throws when missing or blank. */
+function reqStr(key: string): string {
+  const value = str(key);
+  if (value === "") {
+    throw new Error(
+      `[config] Missing required environment variable "${key}" (see .env.example).`
+    );
+  }
+  return value;
+}
+
+/** Required integer — throws when missing, blank or not an integer. */
+function reqInt(key: string): number {
+  const raw = reqStr(key);
+  const value = Number(raw);
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `[config] Environment variable "${key}" must be an integer (got "${raw}").`
+    );
+  }
+  return value;
+}
+
+/** Required boolean — accepts true/false, 1/0, yes/no, on/off. */
+function reqBool(key: string): boolean {
+  const raw = reqStr(key).toLowerCase();
+  if (["true", "1", "yes", "on"].includes(raw)) return true;
+  if (["false", "0", "no", "off"].includes(raw)) return false;
   throw new Error(
-    `[config] Environment variable must be a boolean (got "${raw}") — use true/false.`
+    `[config] Environment variable "${key}" must be a boolean (got "${raw}").`
   );
 }
 
@@ -18,27 +53,24 @@ export const constants = {
   DATABASE_URL: process.env.DATABASE_URL ?? "mongodb://localhost:27017",
   DATABASE_NAME: process.env.DATABASE_NAME ?? "Traderverse-connections",
 
-  // --- Auth mode (who verifies the user's token) ---
-  // true  (DEFAULT, unchanged) → APISIX (openid-connect) verified the token and
-  //         injects `X-Userinfo`: the protected routes only read that header.
-  // false → no gateway in front: THIS service verifies the raw
-  //         `Authorization: Bearer <token>` itself against Keycloak's JWKS
-  //         (signature + `iss` + expiry) and takes the identity from the
-  //         VERIFIED claims. `X-Userinfo` is IGNORED in this mode — trusting it
-  //         would let any caller impersonate any user.
-  // (Same flag/semantics as user-and-identity-service.)
-  GATEWAY_AUTH_ENABLED: parseBool(process.env.GATEWAY_AUTH_ENABLED, true),
-  // --- Keycloak issuer (only used when GATEWAY_AUTH_ENABLED=false) ---
-  KEYCLOAK_BASE_URL: process.env.KEYCLOAK_BASE_URL ?? "",
-  KEYCLOAK_REALM_NAME: process.env.KEYCLOAK_REALM_NAME ?? "",
-  // Optional: explicit JWKS endpoint and extra accepted `iss` values
-  // (comma separated). Blank ⇒ derived from the issuer above.
-  KEYCLOAK_JWKS_URL: process.env.KEYCLOAK_JWKS_URL ?? "",
-  KEYCLOAK_ISSUERS: process.env.KEYCLOAK_ISSUERS ?? "",
+  // --- Keycloak (issuer) — SAME keys as user-and-identity-service ---
+  KEYCLOAK_BASE_URL: reqStr("KEYCLOAK_BASE_URL"),
+  KEYCLOAK_REALM_NAME: reqStr("KEYCLOAK_REALM_NAME"),
   // Tolerated clock skew (seconds) when verifying a Keycloak token locally.
-  KEYCLOAK_CLOCK_TOLERANCE_SECONDS: Number(
-    process.env.KEYCLOAK_CLOCK_TOLERANCE_SECONDS ?? 5
-  ),
+  KEYCLOAK_CLOCK_TOLERANCE_SECONDS: reqInt("KEYCLOAK_CLOCK_TOLERANCE_SECONDS"),
+
+  // --- Auth mode (who verifies the user's token) ---
+  // true  → APISIX verified the token and injects `X-Userinfo`:
+  //         the protected routes read that header.
+  // false → no gateway in front: THIS service verifies the raw
+  //         `Authorization: Bearer <token>` itself against Keycloak's JWKS and
+  //         takes the identity from the VERIFIED claims. `X-Userinfo` is
+  //         ignored completely in this mode.
+  GATEWAY_AUTH_ENABLED: reqBool("GATEWAY_AUTH_ENABLED"),
+  // Optional override for direct-token mode (blank ⇒ derived from the issuer).
+  KEYCLOAK_JWKS_URL: str("KEYCLOAK_JWKS_URL"),
+  // Comma separated accepted `iss` values; blank ⇒ the configured issuer only.
+  KEYCLOAK_ISSUERS: str("KEYCLOAK_ISSUERS"),
 
   // --- NATS: social graph events (per feed-data-sync-service contract) ---
   // Same local cluster as user-and-identity-service; anonymous connect is
