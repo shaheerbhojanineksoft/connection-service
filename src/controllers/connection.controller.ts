@@ -10,6 +10,7 @@ import {
   cancelRequest,
   getConnections,
   getUserPhotos,
+  removeFriend,
   unblockUser,
   unfollow,
   updateConnectionStatus,
@@ -288,6 +289,43 @@ export const connectionController = authInterceptor(new Elysia())
           "matching documents, returning the `_id` of the request found. The " +
           "source route has no validation: an unknown `requestType` just results " +
           "in 'No Request Found.' No notification/Firebase/user-service calls.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/removefriend",
+    async ({ body, set, userId }) => {
+      // Body is optional (the source route has no ValidationPipe): a missing body
+      // behaves like `{}`. `requestType` is accepted but UNUSED by the logic.
+      const payload: CancelRequestDTO = {
+        ...(body as CancelRequestDTO | undefined),
+        userId, // always from the token
+      };
+      // No logic here — just call the service and return its response.
+      const result = await removeFriend(userId, payload);
+      set.status = 201; // NestJS default for POST (errors also return 201)
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object(
+          {
+            connectionId: t.Optional(t.Any()),
+            requestType: t.Optional(t.Any()),
+            userId: t.Optional(t.Any()),
+          },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Remove a friend",
+        description:
+          "Mongo-only: deletes the `friends` connections in BOTH directions, " +
+          "recomputes the cached counts for both users (excluding blocked and " +
+          "deleted users), then deletes the current user's `topfriends` entry. " +
+          "No user-service / notification / Firebase / queue work.",
         security: [{ bearerAuth: [] }],
       },
     }

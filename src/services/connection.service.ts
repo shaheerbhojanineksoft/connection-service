@@ -25,6 +25,7 @@ import {
 } from "../repositories/connections.repo";
 import { findCircles } from "../repositories/circles.repo";
 import { findPhotos } from "../repositories/photos.repo";
+import { deleteTopFriends } from "../repositories/topfriends.repo";
 import { findManyUsers, findOneUser, updateUser } from "../repositories/users.repo";
 import {
   publishSocialBlocked,
@@ -643,6 +644,59 @@ export async function cancelRequest(
       userId: currentUserId,
       connectionId: request?.connectionId,
       requestType: request?.requestType,
+    });
+    return { isSuccess: false, message: "Something Went Wrong." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /removefriend — remove a friend (per contract, Mongo-only)      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Business logic for `POST /removefriend` (source: webapi `removeFriend` +
+ * Socialmedia `removeFriend`) — MONGO ONLY, step order preserved exactly:
+ *   1. delete the `friends` edge in BOTH directions,
+ *   2. recompute friend / following / followers counts for BOTH users
+ *      (`updateFriendAndFollowerCount` → contract §5.1: blocked + deleted users
+ *      are excluded),
+ *   3. delete the CURRENT USER's `topfriends` entry (ONE direction only).
+ *
+ * ⛔ NOT implemented on purpose (contract §6): user-service
+ *    `POST /connections/remove`. There is no notification / Firebase / queue /
+ *    KEDA work in this flow.
+ *
+ * `requestType` in the body is accepted but UNUSED; `userId` comes from the token.
+ * ⚠️ Exact message: "Friend Removed Successfully."
+ */
+export async function removeFriend(
+  currentUserId: string,
+  req: CancelRequestDTO
+): Promise<ResponseModel<any>> {
+  try {
+    // The source route has no ValidationPipe, so the id can be missing — an empty
+    // value simply matches no document (same net effect as the source).
+    const connectionId = req?.connectionId ?? "";
+
+    // 1. friend edges — BOTH directions.
+    await deleteConnections({
+      $or: [
+        { userId: currentUserId, connectionId, requestType: "friends" },
+        { userId: connectionId, connectionId: currentUserId, requestType: "friends" },
+      ],
+    });
+
+    // 2. recompute + persist the cached counts for both users.
+    await updateFriendAndFollowerCount(currentUserId, connectionId);
+
+    // 3. top-friend entry — only the current user's direction.
+    await deleteTopFriends({ userId: currentUserId, friendId: connectionId });
+
+    return { isSuccess: true, message: "Friend Removed Successfully." };
+  } catch (error) {
+    logFailure("removeFriend", error, {
+      connectionId: req?.connectionId,
+      userId: currentUserId,
     });
     return { isSuccess: false, message: "Something Went Wrong." };
   }
