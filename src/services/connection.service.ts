@@ -83,7 +83,19 @@ async function calculateTotalDiversificationCount(query: Record<string, any>) {
       },
     },
   ]);
-  return result ?? { total: 0, ETFs: 0, futures: 0, indices: 0, options: 0, stocks: 0, crypto: 0 };
+  // ⚠️ `nft` is NEVER aggregated by the source — it is hardcoded to 0, but the
+  // key MUST exist in the response (contract §4.3 / §6.3) and in this exact
+  // position (total, ETFs, futures, nft, indices, options, stocks, crypto).
+  return {
+    total: result?.total ?? 0,
+    ETFs: result?.ETFs ?? 0,
+    futures: result?.futures ?? 0,
+    nft: 0,
+    indices: result?.indices ?? 0,
+    options: result?.options ?? 0,
+    stocks: result?.stocks ?? 0,
+    crypto: result?.crypto ?? 0,
+  };
 }
 
 /** Per-user connection counts (boolean connections schema — spec §3 / §4 helper). */
@@ -256,88 +268,103 @@ export async function unblockUser(currentUserId: string, blockedId: string) {
 }
 
 /**
- * Business logic for GET /blockedusers (per source spec — ALL-IN-ONE, no
- * external services; everything is direct Mongo against this service's
- * collections: `users`, `blocked`, `user_view`, `connections`).
+ * Business logic for GET /blockedusers (per `docs/BLOCKED_USERS_LISTING_CONTRACT.md`
+ * — ALL-IN-ONE, no external services; everything is direct Mongo against this
+ * service's collections: `users`, `blocked`, `userviews`, `connections`).
  */
 export async function blockedUsersListing(currentUserId: string) {
-  // 1. user
-  const user = await findOneUser({ _id: currentUserId });
-  if (!user) return { isSuccess: false, message: "User not found", data: {} };
+  try {
+    // 1. user
+    const user = await findOneUser({ _id: currentUserId });
+    if (!user) return { isSuccess: false, data: {}, message: "User not found" };
 
-  // 2. blocked ids (modifiedOn desc)
-  const blocked = await findBlocked({ userId: user._id });
-  if (!blocked.length) return { isSuccess: true, message: "No data found", data: {} };
-  const blockedIds = blocked.map((b: any) => b.blockedId);
+    // 2. blocked ids (modifiedOn desc)
+    const blocked = await findBlocked({ userId: user._id });
+    // ⚠️ SOURCE QUIRK — KEPT DELIBERATELY: there is NO early return for an empty
+    // blocked list. The source's `filterByLocation(...)` always returns an array
+    // (an empty array is truthy), so its `"No data found"` branch is UNREACHABLE.
+    // An empty block list therefore still answers `isSuccess: true` with
+    // "Users Found Succesfully" and an empty `list` + all-zero counts.
+    const blockedIds = blocked.map((b: any) => b.blockedId);
 
-  // 3. find-users (custom)
-  const query = { id: { $in: blockedIds, $nin: [] }, isProfileCompleted: true };
-  const list = await findUserViews(query, {
-    sort: { followers: -1, createdOn: -1 },
-    skip: 0,
-    limit: 10,
-  });
-  const totalCount = await countUserViews(query);
-  const diversificationCount = await calculateTotalDiversificationCount(query);
-  const usersWithId = list.map((u: any) => {
-    u._id = u.id;
-    return u;
-  });
-  const apiResp = { list: usersWithId, totalCount, totalTraders: totalCount, diversificationCount };
-  const userMap = new Map(usersWithId.map((u: any) => [u.id, u]));
+    // 3. find-users (custom) — userviews: id ∈ blockedIds, skipUserIds = []
+    const query = { id: { $in: blockedIds, $nin: [] }, isProfileCompleted: true };
+    const list = await findUserViews(query, {
+      // sortField = ValidSortFilter.followers = "followersCount" (NOT "followers")
+      sort: { followersCount: -1, createdOn: -1 },
+      skip: 0,
+      limit: 10,
+    });
+    const totalCount = await countUserViews(query);
+    const diversificationCount = await calculateTotalDiversificationCount(query);
+    const usersWithId = list.map((u: any) => {
+      u._id = u.id;
+      return u;
+    });
+    const apiResp = { list: usersWithId, totalCount, totalTraders: totalCount, diversificationCount };
+    const userMap = new Map(usersWithId.map((u: any) => [u.id, u]));
 
-  // 4. counts + 5. statuses
-  const userIds = usersWithId.map((u: any) => u.id);
-  const counts = await countUsersBatch(userIds);
-  const [friends, following, reqSent, reqReceived] = await Promise.all([
-    findConnections({ userId: currentUserId, connectionId: { $in: userIds }, requestType: "friends" }),
-    findConnections({ userId: currentUserId, connectionId: { $in: userIds }, requestType: "following" }),
-    findConnections({
-      userId: currentUserId,
-      connectionId: { $in: userIds },
-      requestType: "friendrequest",
-      requestStatus: "pending",
-    }),
-    findConnections({
-      userId: { $in: userIds },
-      connectionId: currentUserId,
-      requestType: "friendrequest",
-      requestStatus: "pending",
-    }),
-  ]);
+    // 4. counts + 5. statuses
+    const userIds = usersWithId.map((u: any) => u.id);
+    const counts = await countUsersBatch(userIds);
+    const [friends, following, reqSent, reqReceived] = await Promise.all([
+      findConnections({ userId: currentUserId, connectionId: { $in: userIds }, requestType: "friends" }),
+      findConnections({ userId: currentUserId, connectionId: { $in: userIds }, requestType: "following" }),
+      findConnections({
+        userId: currentUserId,
+        connectionId: { $in: userIds },
+        requestType: "friendrequest",
+        requestStatus: "pending",
+      }),
+      findConnections({
+        userId: { $in: userIds },
+        connectionId: currentUserId,
+        requestType: "friendrequest",
+        requestStatus: "pending",
+      }),
+    ]);
 
-  // 6. enrich
-  for (const u of usersWithId) {
-    const c = (counts as Record<string, any>)[u.id];
-    if (u && c) {
-      u.followersCount = c.followersCount ?? u.followersCount;
-      u.followingCount = c.followingCount ?? u.followingCount;
-      u.friendCount = c.friendsCount ?? u.friendCount;
+    // 6. enrich
+    for (const u of usersWithId) {
+      const c = (counts as Record<string, any>)[u.id];
+      if (u && c) {
+        u.followersCount = c.followersCount ?? u.followersCount;
+        u.followingCount = c.followingCount ?? u.followingCount;
+        u.friendCount = c.friendsCount ?? u.friendCount;
+      }
     }
-  }
-  for (const item of following) {
-    const u = userMap.get(item.connectionId);
-    if (u) u.isFollowing = true;
-  }
-  for (const item of reqSent) {
-    const u = userMap.get(item.connectionId);
-    if (u) u.requestSentData = item;
-  }
-  for (const item of reqReceived) {
-    const u = userMap.get(item.connectionId);
-    if (u) u.requestReceiveData = item;
-  }
-  for (const item of friends) {
-    const u = userMap.get(item.connectionId);
-    if (u) {
-      u.isFriend = true;
-      u.requestSentData = null;
-      u.requestReceiveData = null;
+    for (const item of following) {
+      const u = userMap.get(item.connectionId);
+      if (u) u.isFollowing = true;
     }
-  }
+    for (const item of reqSent) {
+      const u = userMap.get(item.connectionId);
+      if (u) u.requestSentData = item;
+    }
+    for (const item of reqReceived) {
+      const u = userMap.get(item.connectionId);
+      if (u) u.requestReceiveData = item;
+    }
+    for (const item of friends) {
+      const u = userMap.get(item.connectionId);
+      if (u) {
+        u.isFriend = true;
+        u.requestSentData = null;
+        u.requestReceiveData = null;
+      }
+    }
 
-  // 7. response (⚠️ exact typo "Succesfully")
-  return { isSuccess: true, message: "Users Found Succesfully", data: apiResp };
+    // 7. response (⚠️ exact typo "Succesfully")
+    return { isSuccess: true, data: apiResp, message: "Users Found Succesfully" };
+  } catch (error) {
+    // Source behaviour: log and return NOTHING (no failure envelope), so the
+    // caller sees the same response it saw before this refactor (§9 checklist).
+    // The `Error Message : …` line keeps the EXACT legacy log text; the second
+    // line adds this service's structured detail (name/code/context/stack).
+    console.error(`[connections] Error Message : ${error}`);
+    logFailure("blockedUsersListing", error, { userId: currentUserId });
+    return undefined;
+  }
 }
 
 /* ------------------------------------------------------------------ */
