@@ -29,7 +29,7 @@ import { findCircles } from "../repositories/circles.repo";
 import { constants } from "../config/constants";
 import { findPhotos } from "../repositories/photos.repo";
 import { deleteTopFriends } from "../repositories/topfriends.repo";
-import { findManyUsers, findOneUser, updateUser } from "../repositories/users.repo";
+import { findManyUsers, findOneUser, findUsers, countUsers, aggregateUsers, updateUser } from "../repositories/users.repo";
 import {
   publishSocialBlocked,
   publishSocialFollowed,
@@ -67,8 +67,11 @@ function logFailure(
 }
 
 /** Diversification count aggregation (spec §3 / §4 helper). */
-async function calculateTotalDiversificationCount(query: Record<string, any>) {
-  const [result] = await aggregateUserViews([
+async function calculateTotalDiversificationCount(
+  query: Record<string, any>,
+  source: "userviews" | "users" = "userviews"
+) {
+  const pipeline = [
     { $match: query },
     {
       $group: {
@@ -82,7 +85,8 @@ async function calculateTotalDiversificationCount(query: Record<string, any>) {
         crypto: { $sum: { $cond: [{ $gt: ["$diversification.crypto", 0] }, 1, 0] } },
       },
     },
-  ]);
+  ];
+  const [result] = source === "users" ? await aggregateUsers(pipeline) : await aggregateUserViews(pipeline);
   // ⚠️ `nft` is NEVER aggregated by the source — it is hardcoded to 0, but the
   // key MUST exist in the response (contract §4.3 / §6.3) and in this exact
   // position (total, ETFs, futures, nft, indices, options, stocks, crypto).
@@ -289,17 +293,45 @@ export async function blockedUsersListing(currentUserId: string) {
 
     // 3. find-users (custom) — userviews: id ∈ blockedIds, skipUserIds = []
     const query = { id: { $in: blockedIds, $nin: [] }, isProfileCompleted: true };
-    const list = await findUserViews(query, {
-      // sortField = ValidSortFilter.followers = "followersCount" (NOT "followers")
-      sort: { followersCount: -1, createdOn: -1 },
-      skip: 0,
-      limit: 10,
-    });
-    const totalCount = await countUserViews(query);
-    const diversificationCount = await calculateTotalDiversificationCount(query);
+    // sortField = ValidSortFilter.followers = "followersCount" (NOT "followers")
+    const listSort: Record<string, 1 | -1> = { followersCount: -1, createdOn: -1 };
+    const listOptions = { sort: listSort, skip: 0, limit: 10 };
+    let list = await findUserViews(query, listOptions);
+    let totalCount = await countUserViews(query);
+    let diversificationCount = await calculateTotalDiversificationCount(query, "userviews");
+
+    // ⚠️ FALLBACK: `userviews` is a JOB-MAINTAINED projection. When it is missing
+    // (or has no row for any blocked id) the blocked user would silently vanish
+    // from the list — the exact symptom seen in deployment (block succeeds,
+    // `list: []`). The same lookup is then served from the `users` collection,
+    // which every other flow of this service already depends on.
+    // Primary source is untouched: as soon as `userviews` has rows, they win and
+    // the response is byte-for-byte the legacy one (userview-shaped items).
+    if (!list.length) {
+      const usersQuery = { _id: { $in: blockedIds, $nin: [] }, isProfileCompleted: true };
+      list = await findUsers(usersQuery, {
+        ...listOptions,
+        // never expose credentials/secrets from a raw `users` document
+        projection: { password: 0, email: 0, emailVerificationToken: 0 },
+      });
+      totalCount = await countUsers(usersQuery);
+      diversificationCount = await calculateTotalDiversificationCount(usersQuery, "users");
+      if (list.length) {
+        console.warn(
+          `[connections] ⚠️ blockedUsersListing: \`userviews\` had no row for ${blockedIds.length} blocked id(s) — served ${list.length} from \`users\` instead.`
+        );
+      }
+    }
+
+    // `userviews` rows are keyed by `id`; `users` rows by `_id`. Normalise BOTH to
+    // `{ _id, id, ...row }` so every item carries the same two leading keys with
+    // `_id === id` (exactly like the legacy `user._id = user.id` mapping).
+    // ⚠️ `_id` is destructured OUT of the spread: a raw userview row carries a
+    // MongoDB ObjectId in `_id`, and spreading it back would clobber the string id.
     const usersWithId = list.map((u: any) => {
-      u._id = u.id;
-      return u;
+      const { _id: rawId, ...rest } = u;
+      const id = u.id ?? rawId;
+      return { _id: id, id, ...rest };
     });
     const apiResp = { list: usersWithId, totalCount, totalTraders: totalCount, diversificationCount };
     const userMap = new Map(usersWithId.map((u: any) => [u.id, u]));
