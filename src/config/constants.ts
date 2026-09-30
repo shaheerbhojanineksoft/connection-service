@@ -91,4 +91,13 @@ export const constants = {
     process.env.SOCIAL_CIRCLE_MEMBER_ADDED_SUBJECT ?? "social.circle.member.added",
   SOCIAL_CIRCLE_MEMBER_REMOVED_SUBJECT:
     process.env.SOCIAL_CIRCLE_MEMBER_REMOVED_SUBJECT ?? "social.circle.member.removed",
+
+  // --- NATS: connection-notification jobs ("Connections Notifications — Producer
+  // Contract"). The JetStream stream + durable are OWNED BY THE NOTIFICATION
+  // WORKER — this service only publishes into them and never creates/updates the
+  // stream. Keep both values in sync with the worker's env of the same name.
+  CONNECTIONS_NATS_SUBJECT:
+    process.env.CONNECTIONS_NATS_SUBJECT ?? "connections.notification.jobs",
+  CONNECTIONS_NATS_STREAM:
+    process.env.CONNECTIONS_NATS_STREAM ?? "CONNECTIONS_NOTIFICATION",
 } as const;

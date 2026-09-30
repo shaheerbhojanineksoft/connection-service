@@ -1,16 +1,25 @@
 /**
- * NATS JetStream publisher for social graph events.
+ * NATS JetStream publisher for social graph events and connection-notification jobs.
  *
- * Contract (see "NATS Publisher Integration Guide — Follow / Unfollow / Block"):
+ * 1) SOCIAL stream (see "NATS Publisher Integration Guide — Follow / Unfollow / Block"):
  *   - `social.followed`   -> publish AFTER the Mongo follow edge insert commits
  *   - `social.unfollowed` -> publish AFTER the Mongo follow edge delete commits
  *   - payload is a UTF-8 JSON object: { followerId, followedId, mts }
  *   - publish via JetStream (persisted); PubAck confirms acceptance
  *   - stream name is FIXED: SOCIAL (bound to `social.>`)
  *
+ * 2) CONNECTIONS_NOTIFICATION stream (see "Connections Notifications — Producer Contract"):
+ *   - `connections.notification.jobs` -> payload { id } where `id` is the
+ *     `connections` document `_id` (a string), NOT a user id
+ *   - publish ONLY after the document is written/updated, and only for the
+ *     contracted states: following / friendrequest+pending / friendrequest+accept /
+ *     friendrequest+reject (`friends` is never published)
+ *   - the stream + durable are OWNED BY THE NOTIFICATION WORKER: we publish with
+ *     an expected-stream check and NEVER create the stream ourselves
+ *
  * Every function here is best-effort and NEVER throws, so a NATS outage can
- * never break follow / unfollow flows in this service. Callers use
- * `void publish...()` to avoid adding any latency to the request path.
+ * never break follow / unfollow / friend-request flows in this service. Callers
+ * use `void publish...()` to avoid adding any latency to the request path.
  * Connection and every publish are logged to the console.
  */
 import { connect, StringCodec } from "nats";
@@ -307,6 +316,65 @@ export async function publishSocialCircleMemberRemoved(
       `publish ${constants.SOCIAL_CIRCLE_MEMBER_REMOVED_SUBJECT} circleId=${circleId} userId=${userId}`,
       err
     );
+  }
+}
+
+/**
+ * Publish a connection-notification job ("Connections Notifications — Producer
+ * Contract"). Best-effort, never throws.
+ *
+ * Call ONLY after the `connections` document is written/updated (committed) —
+ * the worker reads the document itself from Mongo using this id.
+ *
+ * ⚠️ The `CONNECTIONS_NOTIFICATION` stream + durable belong to the notification
+ * worker, so we publish with `expect.streamName` instead of creating the stream:
+ * if the worker has not provisioned it yet, the publish fails (distinct warning
+ * below) and the event is dropped — re-publishing the same `_id` on the next
+ * connection event is safe (the worker dedupes on `eventId = connection:<_id>`).
+ *
+ * Never throws. Returns `true` ONLY when JetStream ACKed the publish, so callers
+ * can log the outcome (success AND failure) of every dispatch position.
+ */
+export async function publishConnectionNotification(
+  connectionDocId: string
+): Promise<boolean> {
+  const id = String(connectionDocId);
+  try {
+    const client = await getJetStream();
+    // NATS unreachable / not configured — nothing was published (best-effort).
+    if (!client) return false;
+    const pa = await client.publish(
+      constants.CONNECTIONS_NATS_SUBJECT,
+      encode({ id }),
+      { expect: { streamName: constants.CONNECTIONS_NATS_STREAM } }
+    );
+    console.log(
+      `[nats-connections-publisher] 📤 ${constants.CONNECTIONS_NATS_SUBJECT} ` +
+        `{ id=${id} } stream=${constants.CONNECTIONS_NATS_STREAM} seq=${pa.seq}`
+    );
+    return true;
+  } catch (err) {
+    const e = err as { code?: string | number; message?: string };
+    const code = e?.code === undefined ? "" : String(e.code);
+    const message = errMsg(err);
+    const detail = code ? `code=${code}${message && message !== code ? ` (${message})` : ""}` : message;
+    // `503` = no stream / no responder for the subject. That is the documented
+    // startup case — the notification worker has not provisioned the stream yet —
+    // so log it distinctly instead of as a generic publish failure.
+    const unavailable =
+      code === "503" || /no responders|no stream|stream not found|expected/i.test(message);
+    if (unavailable) {
+      console.warn(
+        `[nats-connections-publisher] ⚠️ ${constants.CONNECTIONS_NATS_STREAM} stream not usable (${detail}) — ` +
+          `dropped { id=${id} }. Start the notification worker; the next connection event re-publishes the same id.`
+      );
+      return false;
+    }
+    console.error(
+      `[nats-connections-publisher] publish ${constants.CONNECTIONS_NATS_SUBJECT} ` +
+        `id=${id} failed (${detail})`
+    );
+    return false;
   }
 }
 

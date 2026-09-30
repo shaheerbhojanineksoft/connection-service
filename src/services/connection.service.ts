@@ -31,6 +31,7 @@ import { findPhotos } from "../repositories/photos.repo";
 import { deleteTopFriends } from "../repositories/topfriends.repo";
 import { findManyUsers, findOneUser, findUsers, countUsers, aggregateUsers, updateUser } from "../repositories/users.repo";
 import {
+  publishConnectionNotification,
   publishSocialBlocked,
   publishSocialFollowed,
   publishSocialUnblocked,
@@ -64,6 +65,82 @@ function logFailure(
     }) context=${JSON.stringify(context)}: ${e?.message ?? String(error)}`
   );
   if (e?.stack) console.error(`[connections] ${operation} stack:\n${e.stack}`);
+}
+
+/**
+ * Actor email cache for the notification logs — the actor id → email lookup is a
+ * single `users` read per event (rare), cached for a minute so a hot flow does not
+ * re-query. Bounded: cleared once it grows past the cap.
+ */
+const ACTOR_EMAIL_TTL_MS = 60_000;
+const ACTOR_EMAIL_CACHE_MAX = 500;
+const actorEmailCache = new Map<string, { email: string; expires: number }>();
+
+/**
+ * The email of the user who PERFORMED the action, for the notification logs.
+ * Read from the `users` collection (the single source of truth for both auth
+ * modes — the token/`X-Userinfo` payload is not guaranteed to carry `email`).
+ * Degrades to "" (logged as `-`) on a missing user or a lookup failure: logging
+ * must never break a connection flow.
+ */
+async function resolveActorEmail(userId: string): Promise<string> {
+  if (!userId) return "";
+  const cached = actorEmailCache.get(userId);
+  if (cached && cached.expires > Date.now()) return cached.email;
+
+  let email = "";
+  try {
+    email = String((await findOneUser({ _id: userId }))?.email ?? "");
+  } catch (error) {
+    logFailure("resolveActorEmail", error, { userId });
+  }
+  if (actorEmailCache.size >= ACTOR_EMAIL_CACHE_MAX) actorEmailCache.clear();
+  actorEmailCache.set(userId, { email, expires: Date.now() + ACTOR_EMAIL_TTL_MS });
+  return email;
+}
+
+/**
+ * Fire-and-forget connection-notification dispatch ("Connections Notifications —
+ * Producer Contract") that logs BOTH outcomes — the publisher is best-effort and
+ * never throws, so this is the only place the result is visible:
+ *
+ *   📨 dispatch        → the job is being published (with the acting user)
+ *   ✅ dispatched      → JetStream ACKed the publish (the worker will read the doc)
+ *   ❌ NOT dispatched  → publish failed / the stream is missing (event dropped;
+ *                        the DB write already committed and the API response is
+ *                        NEVER affected — the next connection event re-publishes
+ *                        the same id, the worker dedupes on `connection:<_id>`)
+ *
+ * Every line carries `flow` (the dispatch position, e.g. `addConnection:following`)
+ * plus the ACTING USER as `userId=<keycloak sub> email=<users.email>` so it is
+ * obvious WHO performed the action (email lookup failures log `email=-`).
+ * The promise is deliberately NOT awaited: a NATS round-trip must never add
+ * latency to the request path.
+ */
+function notifyConnectionWorker(
+  flow: string,
+  connectionDocId: unknown,
+  actorId: unknown
+): void {
+  const id = String(connectionDocId);
+  const userId = String(actorId ?? "");
+  void resolveActorEmail(userId)
+    .then((email) => {
+      const who = `userId=${userId || "-"} email=${email || "-"}`;
+      console.log(`[connections] 📨 connection-notification dispatch (${flow}) id=${id} ${who}`);
+      return publishConnectionNotification(id).then((published: boolean) => {
+        if (published) {
+          console.log(`[connections] ✅ connection-notification dispatched (${flow}) id=${id} ${who}`);
+          return;
+        }
+        console.error(
+          `[connections] ❌ connection-notification NOT dispatched (${flow}) id=${id} ${who} — ` +
+            `publish failed or the ${constants.CONNECTIONS_NATS_STREAM} stream is missing ` +
+            `(see the [nats-connections-publisher] line above). The DB write and the API response are unaffected.`
+        );
+      });
+    })
+    .catch((error: unknown) => logFailure(`connectionNotification(${flow})`, error, { id, userId }));
 }
 
 /** Diversification count aggregation (spec §3 / §4 helper). */
@@ -823,6 +900,16 @@ async function requestRejectFlow(
     if ((request as any).requestType === "followrequest") {
       return { isSuccess: true, message: "Follow Request Rejected." };
     }
+    // Connection notification ("Connections Notifications — Producer Contract"):
+    // friendrequest + "reject" → publish the same `_id` AFTER the status update
+    // committed (the worker updates the recipient's pending notification only —
+    // nobody else is notified). `followrequest` / unknown types are skipped: the
+    // worker has no branch for them.
+    if ((request as any).requestType === "friendrequest") {
+      // ⚠️ `request` is typed nullable (the source guard above deliberately throws
+      // on a missing doc), hence the cast — same style as the branch above.
+      notifyConnectionWorker("updateConnectionStatus:friendrequest-reject", (request as any)._id, currentUserId);
+    }
     return { isSuccess: true, message: "Friend Request Rejected." };
   } catch (error) {
     logFailure("requestRejectFlow", error, { requestId, status: "reject", userId: currentUserId });
@@ -925,6 +1012,15 @@ async function acceptFriendRequestFlow(
 
   // 7. request doc → accept
   await updateRequestDoc(request);
+
+  // Connection notification ("Connections Notifications — Producer Contract"):
+  // friendrequest + "accept" → publish the SAME `_id` again, AFTER the status
+  // update committed. The worker turns the recipient's pending notification into
+  // "You Accepted …" and notifies the requester. (This flow is only reached for
+  // `requestType === "friendrequest"`.)
+  // ⚠️ The follow edges created above are a SIDE EFFECT of the acceptance and do
+  // NOT publish a follow notification (only an explicit follow does).
+  notifyConnectionWorker("updateConnectionStatus:friendrequest-accept", request._id, currentUserId);
 
   // 8. counts (§9 diagram) + response
   await updateFriendAndFollowerCount(requester, target);
@@ -1159,6 +1255,12 @@ async function addFollowing(data: AddConnectionDTO) {
   // follow, friend-request auto-follow, and auto-accept (both directions).
   void publishSocialFollowed(String(data.userId), String(data.connectionId));
 
+  // ⛔ NO connection-notification publish here on purpose. This helper also
+  // creates the follow edges that are SIDE EFFECTS of a friend request / of the
+  // auto-accept flow / of an accepted request — those flows must notify through
+  // their own `friendrequest` event, never with "Started Following You". The ONE
+  // place that publishes a follow notification is the explicit
+  // `requestType: "following"` branch of `addConnection`.
   return saved;
 }
 
@@ -1264,10 +1366,16 @@ export async function addConnection(data: AddConnectionDTO) {
               hideNotification: true,
               requestStatus: "accept",
             });
+            // Connection notification: published AFTER the doc reached its FINAL
+            // state (accept). The transient `pending` state happens inside this
+            // same request, so no "friend request" notification is sent for it.
+            notifyConnectionWorker("addConnection:friendrequest-autoaccept", newConnection._id, data.userId);
             return { isSuccess: true, data: newConnection, message: "Friend Added." };
           } else {
             newConnection.message = "sent you a friend request";
             newConnection.type = "friendrequest";
+            // Connection notification: friendrequest + pending → notify recipient.
+            notifyConnectionWorker("addConnection:friendrequest-pending", newConnection._id, data.userId);
             return { isSuccess: true, data: newConnection, message: "Friend Request Added." };
           }
         }
@@ -1314,6 +1422,11 @@ export async function addConnection(data: AddConnectionDTO) {
         });
         if (!existing.length) {
           const newFollower = await addFollowing(data);
+          // Connection notification ("Connections Notifications — Producer
+          // Contract"): an EXPLICIT follow (requestType "following") notifies the
+          // followed user. Published right after the edge was written — this is
+          // the ONLY follow-notification source in the service.
+          notifyConnectionWorker("addConnection:following", newFollower._id, data.userId);
           const user = await getUser(data.userId);
           if (user?.isProfileCompleted == false)
             return { isSuccess: false, data: null, message: "No User Found" };
