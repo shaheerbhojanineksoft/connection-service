@@ -82,6 +82,65 @@ function sanitizeUser(user: Record<string, any>): any {
   return copy;
 }
 
+/**
+ * Per-viewer relation flags a RAW `users` document carries as a STALE snapshot.
+ * They are written by another service and never updated when the viewer
+ * follows/blocks someone — so they are always recomputed here.
+ */
+const RELATION_FLAG_KEYS = [
+  "isFriend",
+  "isFollowing",
+  "isFollowedBy",
+  "isRequestSent",
+  "isRequestReceived",
+  "isFollowRequestSent",
+  "isFollowRequestReceived",
+  "isBlocked",
+  "isBlockedBy",
+] as const;
+
+/**
+ * Recompute the relation flags on every `members[]` entry from the CURRENT state
+ * of `connections` / `blocked` — the SAME source `POST /connectionssummary` uses —
+ * overwriting the stale snapshot values.
+ *
+ * ⚠️ Members are RAW `users` documents: they keep the `isFollowing` / `isFriend` /
+ * `isBlocked` / … values from whenever the profile was last synced, so a member
+ * the viewer actually follows still reads `isFollowing: false`.
+ *
+ * Best-effort: when the summary lookup returns nothing the members are unchanged.
+ */
+async function applyFreshRelationFlags(
+  viewerId: string,
+  circles: Array<Record<string, any>>
+): Promise<void> {
+  const memberIds = [
+    ...new Set(
+      circles.flatMap((circle) =>
+        Array.isArray(circle?.members)
+          ? circle.members.map((m: any) => String(m?._id))
+          : []
+      )
+    ),
+  ].filter((id) => id && id !== "undefined");
+
+  if (!memberIds.length) return;
+
+  const summary = await getConnectionsSummary(viewerId, memberIds);
+  const connections = summary?.data?.connections ?? [];
+  if (!connections.length) return;
+
+  const flagsById = new Map(connections.map((entry) => [entry.userId, entry]));
+  for (const circle of circles) {
+    if (!Array.isArray(circle?.members)) continue;
+    for (const member of circle.members) {
+      const flags = flagsById.get(String(member?._id));
+      if (!flags) continue;
+      for (const key of RELATION_FLAG_KEYS) member[key] = flags[key];
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* GET /circles — getCirclesByUserId                                   */
 /* ------------------------------------------------------------------ */
@@ -91,6 +150,8 @@ function sanitizeUser(user: Record<string, any>): any {
  * - query `{ userId, isDeleted: { $ne: true } }`, sort createdOn desc, paginated.
  * - member ids enriched in one batch via `users`; when users are returned each
  *   circle's `members` array is rebuilt from them, otherwise kept as stored.
+ * - every member's per-viewer relation flags are then RECOMPUTED (the raw user
+ *   docs carry stale snapshots — see `applyFreshRelationFlags`).
  */
 export async function getCirclesByUserId(
   userId: string,
@@ -125,6 +186,8 @@ export async function getCirclesByUserId(
         }
       }
     }
+
+    await applyFreshRelationFlags(userId, circles);
 
     return ok(circles, "Circles found");
   } catch (error) {
@@ -229,6 +292,8 @@ export async function getCircleById(
     const circle = await findOneCircle({ _id: circleId });
     if (!circle || circle.isDeleted === true) return fail("Circle not found");
     if (circle.userId !== userId) return fail("You are not authorized");
+    // Same stale member snapshots as `GET /circles` — refresh against the viewer.
+    await applyFreshRelationFlags(userId, [circle]);
     return ok(circle, "Circle found");
   } catch (error) {
     logFailure("getCircleById", error, { circleId, userId });

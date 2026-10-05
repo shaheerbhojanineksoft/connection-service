@@ -118,7 +118,12 @@ export const circlesController = authInterceptor(new Elysia())
         summary: "Get the current user's circles",
         description:
           "Returns the current user's active circles (createdOn desc, paginated) " +
-          "with members enriched in one batch.",
+          "with members enriched in one batch. Every member's relation flags " +
+          "(isFriend, isFollowing, isFollowedBy, isRequestSent / isRequestReceived, " +
+          "isFollowRequestSent / isFollowRequestReceived, isBlocked / isBlockedBy) " +
+          "are RECOMPUTED against the authenticated user — the raw user documents " +
+          "otherwise carry stale snapshots (e.g. `isFollowing: false` for someone " +
+          "you follow).",
         security: [{ bearerAuth: [] }],
       },
     }
@@ -133,7 +138,9 @@ export const circlesController = authInterceptor(new Elysia())
       detail: {
         tags: ["Circles"],
         summary: "Get a circle by id",
-        description: "Owner-only lookup; returns the raw circle document.",
+        description:
+          "Owner-only lookup; returns the raw circle document with each member's " +
+          "relation flags recomputed against the authenticated user.",
         security: [{ bearerAuth: [] }],
       },
     }
