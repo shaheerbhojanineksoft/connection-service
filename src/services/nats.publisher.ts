@@ -239,6 +239,34 @@ export async function publishSocialCircleCreated(
 }
 
 /**
+ * Publish a "circle.updated" event. Best-effort, never throws.
+ * Call AFTER the Mongo circle update commits (name / hexColor edits).
+ * Payload matches feed-data-sync-service `CircleUpdatedEventSchema`: { circleId, name, mts }.
+ */
+export async function publishSocialCircleUpdated(
+  circleId: string,
+  name: string
+): Promise<void> {
+  try {
+    const client = await getJetStream();
+    if (!client) return;
+    const pa = await client.publish(
+      constants.SOCIAL_CIRCLE_UPDATED_SUBJECT,
+      encode({ circleId, name, mts: Date.now() })
+    );
+    console.log(
+      `[nats-social-publisher] 📤 ${constants.SOCIAL_CIRCLE_UPDATED_SUBJECT} ` +
+        `{ circleId=${circleId}, name=${name} } seq=${pa.seq}`
+    );
+  } catch (err) {
+    logError(
+      `publish ${constants.SOCIAL_CIRCLE_UPDATED_SUBJECT} circleId=${circleId}`,
+      err
+    );
+  }
+}
+
+/**
  * Publish a "circle.deleted" event. Best-effort, never throws.
  * Call AFTER the Mongo soft delete commits.
  * Payload matches feed-data-sync-service `CircleDeletedEventSchema`: { circleId, mts }.

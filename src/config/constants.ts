@@ -85,6 +85,8 @@ export const constants = {
   SOCIAL_UNBLOCKED_SUBJECT: process.env.SOCIAL_UNBLOCKED_SUBJECT ?? "social.unblocked",
   SOCIAL_CIRCLE_CREATED_SUBJECT:
     process.env.SOCIAL_CIRCLE_CREATED_SUBJECT ?? "social.circle.created",
+  SOCIAL_CIRCLE_UPDATED_SUBJECT:
+    process.env.SOCIAL_CIRCLE_UPDATED_SUBJECT ?? "social.circle.updated",
   SOCIAL_CIRCLE_DELETED_SUBJECT:
     process.env.SOCIAL_CIRCLE_DELETED_SUBJECT ?? "social.circle.deleted",
   SOCIAL_CIRCLE_MEMBER_ADDED_SUBJECT:

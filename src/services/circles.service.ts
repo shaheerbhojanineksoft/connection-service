@@ -27,6 +27,7 @@ import {
   publishSocialCircleDeleted,
   publishSocialCircleMemberAdded,
   publishSocialCircleMemberRemoved,
+  publishSocialCircleUpdated,
 } from "./nats.publisher";
 
 /* ------------------------------------------------------------------ */
@@ -278,6 +279,14 @@ export async function addCircle(data: AddCircleDTO): Promise<ResponseModel> {
     // (best-effort — never throws, never blocks).
     void publishSocialCircleCreated(String(inserted._id), String(name));
 
+    // Publish social.circle.member.added for EACH member stored at creation.
+    // The `created` payload carries only `{ circleId, name }`, so membership is
+    // learned by the graph ONLY from these events — without them the Dgraph
+    // circle has no member edges and circle-visibility lookups come back empty.
+    for (const member of members) {
+      void publishSocialCircleMemberAdded(String(inserted._id), String(member._id));
+    }
+
     return ok(inserted, "Circle created successfully");
   } catch (error) {
     logFailure("addCircle", error, {
@@ -310,6 +319,10 @@ export async function editCircle(data: EditCircleDTO): Promise<ResponseModel> {
     // ⚠️ CAVEAT §6.1: duplicate-name validation never blocks (see addCircle).
 
     await updateCircle({ _id: circleId }, { $set: { name, hexColor } });
+
+    // Publish social.circle.updated AFTER the Mongo update commits so the graph
+    // keeps the circle name in sync (best-effort — never throws, never blocks).
+    void publishSocialCircleUpdated(String(circleId), String(name));
 
     const updated = await findOneCircle({ _id: circleId });
     if (!updated) return fail("Failed to update circle", {});
