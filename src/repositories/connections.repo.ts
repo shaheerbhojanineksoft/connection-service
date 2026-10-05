@@ -88,6 +88,32 @@ export async function findConnectionsPaged(
   return cursor.toArray();
 }
 
+/**
+ * Paginated list of DISTINCT connected users (used by the Circles
+ * `/connections` listing).
+ *
+ * A single relationship can be stored as BOTH a `friends` and a `following`
+ * document for the same directed pair (the accept flow writes both — see
+ * `acceptFriendRequestFlow`). Listing raw documents therefore returned the same
+ * person once per row, and paginating by documents could even split one person
+ * across two pages. Grouping by the other-user id collapses each person to a
+ * single row — keeping the newest `createdOn` so the newest-first sort and the
+ * `page`/`count` window both operate on distinct people.
+ */
+export async function findDistinctConnectionUsersPaged(
+  filter: Record<string, any>,
+  opts: ConnectionQueryOpts = {}
+): Promise<Document[]> {
+  const pipeline: Document[] = [
+    { $match: filter },
+    { $group: { _id: "$userId", createdOn: { $max: "$createdOn" } } },
+  ];
+  if (opts.sort) pipeline.push({ $sort: opts.sort });
+  if (opts.skip) pipeline.push({ $skip: opts.skip });
+  if (opts.limit) pipeline.push({ $limit: opts.limit });
+  return (await connections()).aggregate(pipeline).toArray();
+}
+
 export async function countConnections(filter: Record<string, any>): Promise<number> {
   return (await connections()).countDocuments(filter);
 }

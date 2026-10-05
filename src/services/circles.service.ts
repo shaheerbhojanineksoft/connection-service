@@ -19,7 +19,7 @@ import {
   insertCircle,
   updateCircle,
 } from "../repositories/circles.repo";
-import { findConnectionsPaged } from "../repositories/connections.repo";
+import { findDistinctConnectionUsersPaged } from "../repositories/connections.repo";
 import { findManyUsers } from "../repositories/users.repo";
 import type { Circle, ResponseModel } from "../types/circle.types";
 import {
@@ -149,16 +149,16 @@ export async function getConnectionsForCircle(
     void circleId; // accepted for payload parity — filtering intentionally unused
     const skip = (page - 1) * count;
 
-    // 1. my friends/following edges (paginated, newest first).
-    const connections = await findConnectionsPaged(
+    // 1. my friends/following edges — DISTINCT other users (paginated, newest
+    //    first). A single relationship can exist as both a `friends` and a
+    //    `following` row, so raw-document listing surfaced the same person twice.
+    const connectionUsers = await findDistinctConnectionUsersPaged(
       { connectionId: userId, requestType: { $in: ["friends", "following"] } },
       { sort: { createdOn: -1 }, skip, limit: count }
     );
 
-    // 2. distinct other-user ids.
-    const foundConnectionIds = [
-      ...new Set(connections.map((c: any) => String(c.userId))),
-    ];
+    // 2. other-user ids (the aggregation already collapsed duplicates).
+    const foundConnectionIds = connectionUsers.map((c: any) => String(c._id));
 
     // 3. active circles of the current user containing any of those users.
     const circles = foundConnectionIds.length
@@ -178,9 +178,8 @@ export async function getConnectionsForCircle(
       profilePicture: u.profilePicture,
     }));
 
-    // 5. one entry per connection: { user, circles }.
-    const data = connections.map((conn: any) => {
-      const connId = String(conn.userId);
+    // 5. one entry per connected USER: { user, circles }.
+    const data = foundConnectionIds.map((connId) => {
       const user = slimUsers.find((u: any) => String(u._id) === connId);
       const circleList = circles
         .filter(
