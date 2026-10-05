@@ -66,8 +66,12 @@ export const circlesController = authInterceptor(new Elysia())
         tags: ["Circles"],
         summary: "Get connections + the circles they belong to",
         description:
-          "Lists the current user's friends/following connections (paginated) and, " +
-          "for each, the active circles of the user that contain them. `id` is " +
+          "Lists the current user's friends/following connections (paginated). Each " +
+          "entry FLAT-merges the full `POST /connectionssummary` relation object " +
+          "(isFriend, isFollowing, isFollowedBy, isRequestSent / isRequestReceived, " +
+          "isFollowRequestSent / isFollowRequestReceived, isBlocked / isBlockedBy, " +
+          "`relation` and the raw pending request docs) with that connection's " +
+          "`user` and the active circles of the user that contain them. `id` is " +
           "accepted but unused.",
         security: [{ bearerAuth: [] }],
       },

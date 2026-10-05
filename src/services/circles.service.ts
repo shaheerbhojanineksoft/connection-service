@@ -22,6 +22,8 @@ import {
 import { findDistinctConnectionUsersPaged } from "../repositories/connections.repo";
 import { findManyUsers } from "../repositories/users.repo";
 import type { Circle, ResponseModel } from "../types/circle.types";
+import type { ConnectionSummaryEntry } from "../types/connection-summary.types";
+import { getConnectionsSummary } from "./connection.service";
 import {
   publishSocialCircleCreated,
   publishSocialCircleDeleted,
@@ -179,7 +181,17 @@ export async function getConnectionsForCircle(
       profilePicture: u.profilePicture,
     }));
 
-    // 5. one entry per connected USER: { user, circles }.
+    // 5. per-connection relation summary — the SAME object `POST /connectionssummary`
+    //    returns per user (read-only, one batched call). Best-effort: on failure the
+    //    flags are simply omitted and the circle listing still succeeds.
+    const summary = foundConnectionIds.length
+      ? await getConnectionsSummary(userId, foundConnectionIds)
+      : undefined;
+    const summaryMap = new Map<string, ConnectionSummaryEntry>(
+      (summary?.data?.connections ?? []).map((entry) => [entry.userId, entry])
+    );
+
+    // 6. one entry per connected USER: summary flags + { user, circles }.
     const data = foundConnectionIds.map((connId) => {
       const user = slimUsers.find((u: any) => String(u._id) === connId);
       const circleList = circles
@@ -194,7 +206,7 @@ export async function getConnectionsForCircle(
           _id: c._id,
           createdOn: c.createdOn,
         }));
-      return { user, circles: circleList };
+      return { ...(summaryMap.get(connId) ?? {}), user, circles: circleList };
     });
 
     return ok(data, "Connections Found");

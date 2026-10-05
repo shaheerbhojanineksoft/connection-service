@@ -4,6 +4,8 @@
  * are returned as-is (the source does not reshape circle docs).
  */
 
+import type { ConnectionSummaryEntry } from "./connection-summary.types";
+
 /** A member entry — full user document at write time / profile user when enriched. */
 export interface CircleMember {
   _id: string;
@@ -33,8 +35,14 @@ export interface Circle {
   [key: string]: any;
 }
 
-/** One entry of `GET /circles/connections`. */
-export interface ConnectionCircleEntry {
+/**
+ * One entry of `GET /circles/connections`.
+ *
+ * The FULL per-user relation summary (`POST /connectionssummary` entry shape) is
+ * FLAT-merged into the entry — the summary flags and the circle membership
+ * (`user`, `circles`) live side by side on the same object.
+ */
+export interface ConnectionCircleEntry extends ConnectionSummaryEntry {
   user: { _id: string; fullName: string; profilePicture: string } | undefined;
   circles: Array<{ _id: string; name: string; hexColor: string; createdOn: number }>;
 }
