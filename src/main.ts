@@ -38,6 +38,11 @@ export const app = new Elysia()
             description: "Authenticated connection endpoints (Bearer token required)",
           },
           {
+            name: "Family Connection",
+            description:
+              "Authenticated parent/child (children) endpoints — the `familyConnection` collection (Bearer token required)",
+          },
+          {
             name: "Circles",
             description: "Authenticated circles endpoints (Bearer token required)",
           },

@@ -520,7 +520,7 @@ export const connectionController = authInterceptor(new Elysia())
         )
       ),
       detail: {
-        tags: ["Connections"],
+        tags: ["Family Connection"],
         summary: "Send a children connection request to a parent",
         description:
           "Inserts ONE document into the dedicated `familyConnection` collection " +
@@ -544,7 +544,7 @@ export const connectionController = authInterceptor(new Elysia())
     {
       params: t.Object({ id: t.String(), status: t.String() }),
       detail: {
-        tags: ["Connections"],
+        tags: ["Family Connection"],
         summary: "Accept or reject a children connection request (parent only)",
         description:
           "Restricted to the PARENT (the document's `connectionId`). `accept` / " +
@@ -563,7 +563,7 @@ export const connectionController = authInterceptor(new Elysia())
     },
     {
       detail: {
-        tags: ["Connections"],
+        tags: ["Family Connection"],
         summary: "Get the current user's pending children (parental) requests",
         description:
           "Read-only. Returns every PENDING request from the `familyConnection` " +
