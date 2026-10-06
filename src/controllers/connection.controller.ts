@@ -4,6 +4,7 @@ import { authInterceptor } from "../interceptors/auth.interceptor";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
 import type { CancelRequestDTO } from "../dto/cancel-request.dto";
 import {
+  addChildrenConnection,
   addConnection,
   blockUser,
   blockedUsersListing,
@@ -14,6 +15,7 @@ import {
   removeFriend,
   unblockUser,
   unfollow,
+  updateChildrenRequestStatus,
   updateConnectionStatus,
   userFriendsAndFollowingCount,
 } from "../services/connection.service";
@@ -486,6 +488,64 @@ export const connectionController = authInterceptor(new Elysia())
           "status. Both recompute the cached counts. `reject`: only sets " +
           "`requestStatus`. Any other status returns 'Invald Request Type'. " +
           "No notification/Firebase/user-service/queue work.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .post(
+    "/addChildrenConnection",
+    async ({ body, set, userId }) => {
+      const connectionId = (body as { connectionId?: unknown } | undefined)?.connectionId;
+      if (typeof connectionId !== "string" || connectionId.trim().length === 0) {
+        set.status = 400;
+        return {
+          statusCode: 400,
+          message: ["connectionId should not be empty"],
+          ...BAD_REQUEST,
+        };
+      }
+      // userId always from the token — a body `userId` is ignored/replaced.
+      const result = await addChildrenConnection({ userId, connectionId: connectionId.trim() });
+      set.status = 201; // NestJS default for POST (service failures also return 201)
+      return result;
+    },
+    {
+      body: t.Optional(
+        t.Object(
+          {
+            connectionId: t.Optional(t.String()),
+          },
+          { additionalProperties: true }
+        )
+      ),
+      detail: {
+        tags: ["Connections"],
+        summary: "Send a children connection request to a parent",
+        description:
+          "Inserts ONE `connections` document (relationType/requestType `children`, " +
+          "status `pending`) where `userId` is the authenticated user (the child) and " +
+          "`connectionId` is the parent. No reciprocal document is written; the parent " +
+          "accepts or rejects it via `PUT /childrenrequest/:id/status/:status`.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .put(
+    "/childrenrequest/:id/status/:status",
+    async ({ params, userId }) => {
+      // :id is the children-request document `_id`; only the PARENT may respond.
+      return await updateChildrenRequestStatus(params.id, params.status, userId);
+    },
+    {
+      params: t.Object({ id: t.String(), status: t.String() }),
+      detail: {
+        tags: ["Connections"],
+        summary: "Accept or reject a children connection request (parent only)",
+        description:
+          "Restricted to the PARENT (the document's `connectionId`). `accept` / " +
+          "`reject` flips `requestStatus` on the children request document only — " +
+          "no friend/following edges and no count updates. Any other status returns " +
+          "'Invald Request Type'.",
         security: [{ bearerAuth: [] }],
       },
     }

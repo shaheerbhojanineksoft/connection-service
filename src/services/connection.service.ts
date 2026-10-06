@@ -4,6 +4,7 @@ import {
   findUserViews,
 } from "../repositories/userView.repo";
 import type { AddConnectionDTO } from "../dto/add-connection.dto";
+import type { AddChildrenConnectionDTO } from "../dto/add-children-connection.dto";
 import type { GetConnectionsDTO } from "../dto/get-connections.dto";
 import type { CancelRequestDTO } from "../dto/cancel-request.dto";
 import {
@@ -1446,6 +1447,145 @@ export async function addConnection(data: AddConnectionDTO) {
     }
   } catch (error) {
     return { isSuccess: false, data: error, message: "Something Went Wrong." };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* POST /addChildrenConnection — child → parent request (NEW)          */
+/* + PUT /childrenrequest/:id/status/:status — parent accept/reject    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Child → Parent request: inserts EXACTLY ONE `connections` document where
+ *   userId        = the AUTHENTICATED user (the CHILD),
+ *   connectionId  = the PARENT's id,
+ *   relationType  = "children",
+ *   requestType   = "children",
+ *   requestStatus = "pending".
+ *
+ * There is NO reciprocal document — the parent's accept/reject flips
+ * `requestStatus` on this same document (`updateChildrenRequestStatus`).
+ *
+ * Request  → `{ connectionId }` (the PARENT id; `userId` comes from the token)
+ * Response → success `{ isSuccess: true, data: <inserted doc>, message: "Children Request Added." }`
+ *            already exists → `{ isSuccess: true, data: null, message: "Children Request Already Exists." }`
+ *            self-connection → `{ isSuccess: false, data: {}, message: "Please add correct connection Id " }`
+ *            error → `{ isSuccess: false, data: null, message: "Something Went Wrong." }`
+ */
+export async function addChildrenConnection(
+  data: AddChildrenConnectionDTO
+): Promise<ResponseModel<any>> {
+  try {
+    // guard: self-connection (same message as /addConnection).
+    if (data.userId === data.connectionId) {
+      return { isSuccess: false, data: {}, message: "Please add correct connection Id " };
+    }
+
+    // duplicate guard: an existing children request in EITHER direction that is
+    // still pending or already accepted blocks a second one. A REJECTED request
+    // may be sent again.
+    const existing = await findConnections({
+      $or: [
+        {
+          userId: data.userId,
+          connectionId: data.connectionId,
+          requestType: "children",
+          requestStatus: { $in: ["pending", "accept"] },
+        },
+        {
+          userId: data.connectionId,
+          connectionId: data.userId,
+          requestType: "children",
+          requestStatus: { $in: ["pending", "accept"] },
+        },
+      ],
+    });
+    if (existing.length) {
+      return { isSuccess: true, data: null, message: "Children Request Already Exists." };
+    }
+
+    const user = await getUser(data.userId);
+    const parent = await getUser(data.connectionId);
+
+    // Same denormalized shape as every other connection document; the three
+    // defining fields are hardcoded so a client body cannot change them.
+    const doc = buildConnectionDoc(
+      {
+        userId: data.userId,
+        connectionId: data.connectionId,
+        requestType: "children",
+        relationType: "children",
+      },
+      user,
+      parent
+    );
+
+    const saved = await insertConnection(doc);
+    return { isSuccess: true, data: saved, message: "Children Request Added." };
+  } catch (error) {
+    logFailure("addChildrenConnection", error, {
+      userId: data?.userId,
+      connectionId: data?.connectionId,
+    });
+    return { isSuccess: false, data: null, message: "Something Went Wrong." };
+  }
+}
+
+/**
+ * Business logic for `PUT /childrenrequest/:id/status/:status` — the PARENT
+ * accepts or rejects a children request. Mongo-only: flips `requestStatus` on
+ * the existing document, NOTHING else (no friend/follow edges, no counts).
+ *
+ * Access is RESTRICTED to the parent: `currentUserId` MUST equal the document's
+ * `connectionId`, otherwise the response is a failure and no write happens.
+ *
+ * Request  → `:id` = the request document `_id`, `:status` = `accept` | `reject`
+ * Response → success `{ isSuccess: true, message: "Children Request Accepted." | "Children Request Rejected." }`
+ *            unknown doc → `{ isSuccess: false, message: "No Request Found" }`
+ *            not the parent → `{ isSuccess: false, message: "You are not authorized to respond to this request." }`
+ *            bad status → `{ isSuccess: false, message: "Invald Request Type" }`
+ */
+export async function updateChildrenRequestStatus(
+  requestId: string,
+  status: string,
+  currentUserId: string
+): Promise<ResponseModel<any>> {
+  try {
+    // Only the two documented statuses are accepted (same wording as the
+    // generic `PUT /:id/status/:status` endpoint, typo included).
+    if (status !== "accept" && status !== "reject") {
+      return { isSuccess: false, message: "Invald Request Type" };
+    }
+
+    const request = await findOneConnectionById(requestId);
+    if (!request || String(request.requestType) !== "children") {
+      console.warn(
+        `[connections] ⚠️ updateChildrenRequestStatus: no children request for id="${requestId}" ` +
+          `(lookup tried: ${connectionIdLookupForms(requestId).join(", ") || "none"}, ` +
+          `collection="connections" of ${constants.DATABASE_NAME})`
+      );
+      return { isSuccess: false, message: "No Request Found" };
+    }
+
+    // The PARENT owns the decision — the doc's `connectionId` is the parent id.
+    if (String(request.connectionId) !== String(currentUserId)) {
+      console.warn(
+        `[connections] ⚠️ updateChildrenRequestStatus: user "${currentUserId}" is not the parent ` +
+          `("${String(request.connectionId)}") of request id="${requestId}" — rejected.`
+      );
+      return { isSuccess: false, message: "You are not authorized to respond to this request." };
+    }
+
+    request.requestStatus = status;
+    await updateRequestDoc(request);
+
+    return {
+      isSuccess: true,
+      message: status === "accept" ? "Children Request Accepted." : "Children Request Rejected.",
+    };
+  } catch (error) {
+    logFailure("updateChildrenRequestStatus", error, { requestId, status, userId: currentUserId });
+    return { isSuccess: false, message: "Something Went Wrong." };
   }
 }
 
