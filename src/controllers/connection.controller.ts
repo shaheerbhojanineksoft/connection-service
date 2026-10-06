@@ -11,6 +11,7 @@ import {
   cancelRequest,
   getConnections,
   getConnectionsSummary,
+  getPendingChildrenRequests,
   getUserPhotos,
   removeFriend,
   unblockUser,
@@ -522,10 +523,14 @@ export const connectionController = authInterceptor(new Elysia())
         tags: ["Connections"],
         summary: "Send a children connection request to a parent",
         description:
-          "Inserts ONE `connections` document (relationType/requestType `children`, " +
-          "status `pending`) where `userId` is the authenticated user (the child) and " +
-          "`connectionId` is the parent. No reciprocal document is written; the parent " +
-          "accepts or rejects it via `PUT /childrenrequest/:id/status/:status`.",
+          "Inserts ONE document into the dedicated `familyConnection` collection " +
+          "(relationType/requestType `children`, status `pending`) where `userId` is " +
+          "the authenticated user (the child) and `connectionId` is the parent's `_id` " +
+          "— or the parent's EMAIL while that parent has no account yet. No reciprocal " +
+          "document is written; the parent accepts or rejects it via " +
+          "`PUT /childrenrequest/:id/status/:status` and lists it via " +
+          "`GET /childrenrequests`. The friend/follow `connections` graph is never " +
+          "touched by this flow.",
         security: [{ bearerAuth: [] }],
       },
     }
@@ -546,6 +551,27 @@ export const connectionController = authInterceptor(new Elysia())
           "`reject` flips `requestStatus` on the children request document only — " +
           "no friend/following edges and no count updates. Any other status returns " +
           "'Invald Request Type'.",
+        security: [{ bearerAuth: [] }],
+      },
+    }
+  )
+  .get(
+    "/childrenrequests",
+    async ({ userId }) => {
+      // No logic here — just call the service and return its response.
+      return await getPendingChildrenRequests(userId);
+    },
+    {
+      detail: {
+        tags: ["Connections"],
+        summary: "Get the current user's pending children (parental) requests",
+        description:
+          "Read-only. Returns every PENDING request from the `familyConnection` " +
+          "collection raised against the authenticated user (the parent), newest " +
+          "first — each document carries the child's `userId` / `_id` and the " +
+          "denormalized child fields (userName, userFullName, userProfilePicture, …) " +
+          "needed to accept or reject it via " +
+          "`PUT /childrenrequest/:id/status/:status`.",
         security: [{ bearerAuth: [] }],
       },
     }

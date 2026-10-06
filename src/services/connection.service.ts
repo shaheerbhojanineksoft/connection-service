@@ -26,6 +26,15 @@ import {
   updateConnection,
   upsertConnection,
 } from "../repositories/connections.repo";
+import {
+  FAMILY_CONNECTION_COLLECTION,
+  familyConnectionIdLookupForms,
+  findFamilyConnections,
+  findOneFamilyConnection,
+  findOneFamilyConnectionById,
+  insertFamilyConnection,
+  updateFamilyConnection,
+} from "../repositories/familyConnections.repo";
 import { findCircles } from "../repositories/circles.repo";
 import { constants } from "../config/constants";
 import { findPhotos } from "../repositories/photos.repo";
@@ -1453,12 +1462,17 @@ export async function addConnection(data: AddConnectionDTO) {
 /* ------------------------------------------------------------------ */
 /* POST /addChildrenConnection — child → parent request (NEW)          */
 /* + PUT /childrenrequest/:id/status/:status — parent accept/reject    */
+/* + GET /childrenrequests — pending requests for the current parent   */
 /* ------------------------------------------------------------------ */
 
 /**
- * Child → Parent request: inserts EXACTLY ONE `connections` document where
+ * Child → Parent request: inserts EXACTLY ONE document into the dedicated
+ * `familyConnection` collection (NEVER `connections` — the friend/follow graph
+ * is untouched by this flow) where
  *   userId        = the AUTHENTICATED user (the CHILD),
- *   connectionId  = the PARENT's id,
+ *   connectionId  = the PARENT's `_id`, or the parent's EMAIL while that parent
+ *                   has no account yet (they were invited; the signup flow
+ *                   repoints the email to the real `_id`),
  *   relationType  = "children",
  *   requestType   = "children",
  *   requestStatus = "pending".
@@ -1466,7 +1480,7 @@ export async function addConnection(data: AddConnectionDTO) {
  * There is NO reciprocal document — the parent's accept/reject flips
  * `requestStatus` on this same document (`updateChildrenRequestStatus`).
  *
- * Request  → `{ connectionId }` (the PARENT id; `userId` comes from the token)
+ * Request  → `{ connectionId }` (parent id OR email; `userId` from the token)
  * Response → success `{ isSuccess: true, data: <inserted doc>, message: "Children Request Added." }`
  *            already exists → `{ isSuccess: true, data: null, message: "Children Request Already Exists." }`
  *            self-connection → `{ isSuccess: false, data: {}, message: "Please add correct connection Id " }`
@@ -1484,7 +1498,7 @@ export async function addChildrenConnection(
     // duplicate guard: an existing children request in EITHER direction that is
     // still pending or already accepted blocks a second one. A REJECTED request
     // may be sent again.
-    const existing = await findConnections({
+    const existing = await findFamilyConnections({
       $or: [
         {
           userId: data.userId,
@@ -1505,7 +1519,15 @@ export async function addChildrenConnection(
     }
 
     const user = await getUser(data.userId);
+    // Not a user (yet) ⇒ the connectionId IS the invited parent's email, so the
+    // denormalized connection* fields stay empty until they sign up.
     const parent = await getUser(data.connectionId);
+    if (!parent) {
+      console.log(
+        `[connections] · addChildrenConnection: connectionId="${data.connectionId}" is not a user — ` +
+          `stored as the invited parent's EMAIL (pending signup)`
+      );
+    }
 
     // Same denormalized shape as every other connection document; the three
     // defining fields are hardcoded so a client body cannot change them.
@@ -1520,7 +1542,7 @@ export async function addChildrenConnection(
       parent
     );
 
-    const saved = await insertConnection(doc);
+    const saved = await insertFamilyConnection(doc);
     return { isSuccess: true, data: saved, message: "Children Request Added." };
   } catch (error) {
     logFailure("addChildrenConnection", error, {
@@ -1532,9 +1554,23 @@ export async function addChildrenConnection(
 }
 
 /**
+ * `familyConnection` twin of `updateRequestDoc`: `$set` the whole document (all
+ * fields except `_id`) plus `modifiedOn` / `modifiedBy`. Kept separate because
+ * the children docs live in their OWN collection.
+ */
+async function updateFamilyRequestDoc(request: any): Promise<void> {
+  const { _id, ...fields } = request;
+  await updateFamilyConnection(
+    { _id },
+    { $set: { ...fields, modifiedOn: Date.now(), modifiedBy: "" } }
+  );
+}
+
+/**
  * Business logic for `PUT /childrenrequest/:id/status/:status` — the PARENT
  * accepts or rejects a children request. Mongo-only: flips `requestStatus` on
- * the existing document, NOTHING else (no friend/follow edges, no counts).
+ * the existing `familyConnection` document, NOTHING else (no friend/follow
+ * edges, no counts).
  *
  * Access is RESTRICTED to the parent: `currentUserId` MUST equal the document's
  * `connectionId`, otherwise the response is a failure and no write happens.
@@ -1557,12 +1593,12 @@ export async function updateChildrenRequestStatus(
       return { isSuccess: false, message: "Invald Request Type" };
     }
 
-    const request = await findOneConnectionById(requestId);
+    const request = await findOneFamilyConnectionById(requestId);
     if (!request || String(request.requestType) !== "children") {
       console.warn(
         `[connections] ⚠️ updateChildrenRequestStatus: no children request for id="${requestId}" ` +
-          `(lookup tried: ${connectionIdLookupForms(requestId).join(", ") || "none"}, ` +
-          `collection="connections" of ${constants.DATABASE_NAME})`
+          `(lookup tried: ${familyConnectionIdLookupForms(requestId).join(", ") || "none"}, ` +
+          `collection="${FAMILY_CONNECTION_COLLECTION}" of ${constants.DATABASE_NAME})`
       );
       return { isSuccess: false, message: "No Request Found" };
     }
@@ -1577,8 +1613,7 @@ export async function updateChildrenRequestStatus(
     }
 
     request.requestStatus = status;
-    await updateRequestDoc(request);
-
+    await updateFamilyRequestDoc(request);
     return {
       isSuccess: true,
       message: status === "accept" ? "Children Request Accepted." : "Children Request Rejected.",
@@ -1586,6 +1621,35 @@ export async function updateChildrenRequestStatus(
   } catch (error) {
     logFailure("updateChildrenRequestStatus", error, { requestId, status, userId: currentUserId });
     return { isSuccess: false, message: "Something Went Wrong." };
+  }
+}
+
+/**
+ * Business logic for `GET /childrenrequests` — every PENDING children request
+ * raised against the CURRENT user (the parent), newest first.
+ *
+ * Read-only. `connectionId` is matched against the parent's `_id` only: an
+ * invite that still carries the parent's EMAIL is repointed to the `_id` by the
+ * signup flow, so it shows up here from the moment they have an account.
+ *
+ * Response → `{ isSuccess: true, data: [<familyConnection docs>], message: "" }`
+ */
+export async function getPendingChildrenRequests(
+  currentUserId: string
+): Promise<ResponseModel<any[]>> {
+  try {
+    const requests = await findFamilyConnections(
+      {
+        connectionId: currentUserId,
+        requestType: "children",
+        requestStatus: "pending",
+      },
+      { sort: { createdOn: -1 } }
+    );
+    return { isSuccess: true, data: requests, message: "" };
+  } catch (error) {
+    logFailure("getPendingChildrenRequests", error, { userId: currentUserId });
+    return { isSuccess: false, data: [], message: "Something Went Wrong." };
   }
 }
 
